@@ -1,53 +1,67 @@
-# Nexus Gateway
+# Agent Nexus Gateway
 
 [![CI](https://github.com/lumia1998/nexus-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/lumia1998/nexus-gateway/actions/workflows/ci.yml)
 
-`nexus-agentd` 是 Nexus Gateway 的服务端程序。它通过 WebUI 管理 ACP Agent、Workspace
-allowlist、权限策略和 Access Key，再向 Koishi AgentNexus 或其他客户端提供统一 HTTP/SSE API。
+`nexus-agentd` 是 Agent Nexus 的本地 Gateway。它在一台机器上统一管理 ACP 进程和远程 A2A
+Agent，并向 Koishi AgentNexus 或其他客户端提供 HTTP/SSE API。管理控制台使用 **Agent Nexus**
+品牌，不依赖 CDN、前端框架或父仓库。
 
-这个仓库是完整的独立项目，不依赖 Koishi、CDN 或其他父仓库。运行时只在 Agent 所在机器启动
-ACP stdio 子进程，客户端不需要逐个配置 Agent 命令。
-
-## 一条命令启动
+## 启动
 
 ```bash
 npm install -g nexus-agentd
 nexus-agentd
 ```
 
-配置不存在时会自动创建待初始化的 `./nexus-agentd.json`，使用当前目录作为 Workspace Root，
-监听 `127.0.0.1:8787`，并打印 WebUI 地址。打开 WebUI 后会进入不可跳过的首次安装引导，
-由管理员手动设置并确认至少 8 位的 Access Key；Gateway 不会自动生成或回显这个 Key。
+首次启动会创建 `./nexus-agentd.json`，默认监听 `127.0.0.1:8787`。打开打印出的 WebUI 地址，
+设置至少 12 位的 Console Password，然后登录。新安装不会自动创建 API Key；在控制台的
+**API Keys** 页面按实际客户端需要创建。
 
-Koishi 位于另一台机器时：
+局域网使用时显式监听所有网卡：
 
 ```bash
 mkdir -p /data/repos
 nexus-agentd --host 0.0.0.0 --workspace /data/repos
 ```
 
-`--host`、`--port` 和 `--workspace` 只用于首次创建配置。之后通过当前配置文件启动：
+`0.0.0.0` 是受支持的监听地址。CLI 会同时打印本机和检测到的 LAN IPv4 WebUI 地址。
+`--host`、`--port` 和 `--workspace` 只用于首次创建配置；配置存在后直接指定文件：
 
 ```bash
 nexus-agentd --config /etc/agent-nexus/nexus-agentd.json
 ```
 
+## 认证边界
+
+控制面和数据面使用不同凭证：
+
+- Console Password 只用于管理员登录。服务端以 scrypt 哈希保存，登录后只下发
+  `HttpOnly; SameSite=Strict` Cookie，浏览器不保存密码。
+- API Key 只用于 `/v1/agents` 和 `/v1/sessions/*`。Key 可以命名、限制为全部或指定 Agent、
+  停用、删除、重生成和按需 reveal。
+- Key 自动生成为 `nx_sk_...`；也可设置至少 16 位的自定义值。
+- 为支持管理员按需 reveal，API Key 可恢复地保存在权限为 `0600` 的配置文件中，不会出现在
+  普通配置响应或日志里。
+
+旧配置中的 `authToken` 会继续作为名为 `Legacy Access Key` 的全 Agent 数据面 Key 工作。它不会
+被当成 Console Password。升级后第一次打开 WebUI 会要求单独设置管理员密码，原有 Agent 和
+Workspace 配置保持不变。
+
 ## WebUI
 
-首次打开 `http://HOST:8787/ui/` 时按引导设置 Access Key；初始化完成后输入同一个 Key 登录。
-控制台支持：
+固定侧栏有总览、运行记录、智能体、工作区和 API 密钥五个主页面。管理员菜单位于侧栏底部，
+提供 Light / Dark / System 主题、修改密码和退出登录。
 
-- 添加、修改、启用、禁用和删除 Agent。
-- 查看每个 Agent 的实际 readiness 和错误。
-- 配置默认 Workspace 与 `ask` / `deny` 权限策略。
-- 修改 Workspace Roots；保存前校验全部现有 Agent 仍位于 allowlist 内。
-- 轮换 Access Key；旧 Key 立即失效，新 Key 只显示一次。
-- 在概览、Agents、工作区和密钥管理之间切换，并保存亮色/暗色主题偏好。
+- Overview 只显示真实 Agent、Ready 和当前内存 Session 数量。
+- 运行记录把当前任务和历史任务分开显示，记录用户原始任务、真实运行阶段、状态、结果摘要、
+  耗时和产物；每 5 秒自动刷新，也可查看完整详情。
+- Agents 支持本地 ACP 与远程 A2A；readiness 每 20 秒自动刷新，也可手动刷新。
+- Workspaces 管理 ACP 的 realpath allowlist；A2A 不使用本地 Workspace。
+- API Keys 显示真实状态和最后使用时间，并提供独立的显式 reveal 操作。
 
-WebUI 不依赖 CDN 或 Koishi，配置使用临时文件校验后原子替换并热重载；已运行 Session 不会因配置
-变化而中断。
+## Agent 协议
 
-## Agent Driver
+### ACP
 
 | Driver | 默认入口 |
 |---|---|
@@ -58,7 +72,7 @@ WebUI 不依赖 CDN 或 Koishi，配置使用临时文件校验后原子替换�
 | `openclaw` | `openclaw acp` |
 | `hermes` | `hermes acp` |
 
-Claude Code、Codex、Pi 通常需要先安装对应 Adapter：
+Claude Code、Codex、Pi 通常需要对应 Adapter：
 
 ```bash
 npm install -g \
@@ -67,69 +81,116 @@ npm install -g \
   pi-acp
 ```
 
-还需在本机完成各 Agent 自身的登录或 API Key 配置。
-Hermes 使用原生 ACP extra；readiness 会执行 `hermes acp --check`。
+`command`、`args`、`inheritEnv` 和 `env` 是仅可在本机配置文件修改的高级字段，WebUI 不接受这些
+字段。Workspace 在启动进程前经过 `realpath` 边界校验。
 
-## 配置
+### A2A
+
+A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现名称、能力和实际调用地址，
+支持 JSON-RPC / HTTP+JSON 传输、流式消息（SDK 自动回退为非流式）、任务状态、Artifacts 和取消。
+首选传输可设为 `auto`、`jsonrpc` 或 `http-json`；可配置无认证、Bearer 或自定义 Header。私有网段
+和局域网 URL 不会被禁止。
 
 ```json
 {
-  "initialized": true,
-  "listen": {
-    "host": "127.0.0.1",
-    "port": 8787
+  "protocol": "a2a",
+  "name": "Research Agent",
+  "agentCardUrl": "http://192.168.1.20:8080/.well-known/agent-card.json",
+  "preferredTransport": "auto",
+  "auth": {
+    "type": "bearer",
+    "value": "env:RESEARCH_AGENT_TOKEN"
   },
-  "authToken": "env:NEXUS_AGENTD_TOKEN",
-  "workspaceRoots": [
-    "/data/repos"
-  ],
-  "agents": {
-    "codex": {
-      "driver": "codex",
-      "name": "Codex",
-      "workspace": "/data/repos/project",
-      "permissionPolicy": "ask"
-    }
-  }
+  "timeoutMs": 60000
 }
 ```
 
-`command`、`args`、`inheritEnv` 和 `env` 属于本机高级配置，不可通过 HTTP/WebUI 写入。Secret
-字段支持 `env:VAR`。
+旧配置中的 `agentUrl` 仍按“服务根地址 + `/.well-known/agent-card.json`”方式发现 Card，无需手工
+迁移；在 WebUI 中保存一次后会写入新的 `agentCardUrl` 字段。
+
+## 配置
+
+推荐从首次启动生成的待初始化配置开始。完整示例见
+[`nexus-agentd.example.json`](./nexus-agentd.example.json)。数值和数组字段会严格校验，错误配置
+会在启动或原子热重载前被拒绝，不再静默截断或忽略错误类型。
+
+常用资源限制：
+
+```json
+{
+  "maxRequestBytes": 1048576,
+  "requestTimeoutMs": 30000,
+  "promptTimeoutMs": 1800000,
+  "maxSessions": 64,
+  "maxSseConnections": 128,
+  "maxConnections": 256,
+  "sessionTtlMs": 86400000
+}
+```
+
+API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
+旧 `authToken` 复制到该字段。
+
+运行记录保存在配置文件同目录的 `nexus-agentd-runs.json` sidecar 中，默认最多保留 1000 条。
+记录文件使用 `0600` 权限和原子替换；进行中的任务若遇到 Gateway 重启，会在下次启动时标记为
+“已中断/失败”，而不会一直显示为运行中。
 
 ## API
 
+匿名端点：
+
 ```text
-GET    /health
-GET    /v1/bootstrap/status
-POST   /v1/bootstrap/initialize
-GET    /v1/agents
-GET    /v1/config
-PUT    /v1/config/workspace-roots
-POST   /v1/config/access-key/rotate
-PUT    /v1/config/agents/:id
-DELETE /v1/config/agents/:id
-POST   /v1/sessions
-GET    /v1/sessions/:id
-POST   /v1/sessions/:id/message
-POST   /v1/sessions/:id/cancel
-GET    /v1/sessions/:id/events
+GET  /health
+GET  /v1/bootstrap/status
+POST /v1/bootstrap/initialize
+GET  /v1/admin/auth/status
+POST /v1/admin/auth/login
+POST /v1/admin/auth/logout
 ```
 
-`/v1/bootstrap/status` 可匿名查询初始化状态；`/v1/bootstrap/initialize` 只在首次安装时可成功
-一次，并要求同源 JSON 请求。除这两个端点、`/health` 和静态 WebUI 外均要求
-`Authorization: Bearer ACCESS_KEY`。Session 创建只接受
-`agentId` 与可选 `workspace`；消息接口只接受 `message`。额外 command、argv、shell 或环境字段会
-返回 `400`。
+管理员 Cookie 端点：
 
-## 安全
+```text
+GET    /v1/admin/overview
+GET    /v1/admin/config
+GET    /v1/admin/agents
+GET    /v1/admin/runs
+GET    /v1/admin/runs/:id
+PUT    /v1/admin/agents/:id
+DELETE /v1/admin/agents/:id
+PUT    /v1/admin/config/workspace-roots
+PUT    /v1/admin/password
+GET    /v1/admin/api-keys
+POST   /v1/admin/api-keys
+PATCH  /v1/admin/api-keys/:id
+DELETE /v1/admin/api-keys/:id
+POST   /v1/admin/api-keys/:id/reveal
+POST   /v1/admin/api-keys/:id/regenerate
+```
 
-- 默认只监听 localhost；LAN 监听时使用防火墙限制 Koishi 来源地址。
-- 不直接暴露公网；跨网络放在 HTTPS/mTLS 反向代理或可信隧道之后。
-- 初始化后的配置文件包含 Key，应保持 `0600`；agentd 创建和更新配置时均保持该权限。
-- Workspace 使用 `realpath` 边界校验，拒绝 traversal 和 symlink/junction 逃逸。
-- 使用专用低权限系统账号运行 Gateway。
-- `permissionPolicy=ask` 是默认值，`deny` 适合无人值守；没有自动批准模式。
+Bearer API Key 数据面：
+
+```text
+GET  /v1/agents
+POST /v1/sessions
+GET  /v1/sessions/:id
+POST /v1/sessions/:id/message
+POST /v1/sessions/:id/cancel
+GET  /v1/sessions/:id/events
+```
+
+API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session 操作上都会检查；Session
+还绑定创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。
+运行记录接口仅接受管理员 Cookie，数据面 API Key 无权读取。
+
+## 局域网安全
+
+- 默认仍只监听 localhost；需要 LAN 时显式使用 `--host 0.0.0.0`，并用主机防火墙限制来源。
+- LAN 上的纯 HTTP 为兼容 Cookie 默认不设置 `Secure`；跨不可信网络应放在 HTTPS/mTLS 反向代理
+  或可信隧道后，并将 `secureAdminCookies` 设为 `true`。
+- 管理写操作要求同源 `Origin`，Cookie 使用 `SameSite=Strict`；登录和无效 API Key 有失败限速。
+- 不直接暴露公网。使用专用低权限系统账号运行 Gateway。
+- 配置更新使用 `0600` 临时文件校验后原子替换；Secret 不进入普通响应和结构化错误日志。
 
 ## 验证
 

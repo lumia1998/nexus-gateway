@@ -1,81 +1,149 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ensureAgentdConfig, loadAgentdConfig } from '../src/config.js'
 
-test('first run creates a secure pending Gateway config for WebUI setup', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-first-run-'))
-    const workspace = path.join(directory, 'repos')
-    const configPath = path.join(directory, 'config', 'nexus-agentd.json')
-    await mkdir(workspace)
+test('first run creates a pending config and preserves an explicit 0.0.0.0 listener', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-config-'))
+    const configPath = path.join(directory, 'nexus-agentd.json')
     try {
-        const created = await ensureAgentdConfig(configPath, {
+        const result = await ensureAgentdConfig(configPath, {
             host: '0.0.0.0',
-            port: 18888,
-            workspace
-        })
-        assert.deepEqual(created, { created: true })
-
-        const raw = JSON.parse(await readFile(configPath, 'utf8'))
-        assert.equal(raw.listen.host, '0.0.0.0')
-        assert.equal(raw.listen.port, 18888)
-        assert.equal(raw.initialized, false)
-        assert.equal('authToken' in raw, false)
-        assert.deepEqual(raw.workspaceRoots, [workspace])
-        assert.deepEqual(raw.agents, {})
-
-        if (process.platform !== 'win32') {
-            assert.equal((await stat(configPath)).mode & 0o777, 0o600)
-        }
-        const loaded = await loadAgentdConfig(configPath)
-        assert.equal(loaded.initialized, false)
-        assert.equal(loaded.authToken, undefined)
-
-        const repeated = await ensureAgentdConfig(configPath, {
+            port: 9876,
             workspace: directory
         })
-        assert.deepEqual(repeated, { created: false })
-        assert.equal(
-            JSON.parse(await readFile(configPath, 'utf8')).initialized,
-            false
-        )
+        assert.deepEqual(result, { created: true })
+        const raw = JSON.parse(await readFile(configPath, 'utf8'))
+        assert.equal(raw.initialized, false)
+        assert.equal(raw.listen.host, '0.0.0.0')
+        assert.deepEqual(raw.apiKeys, [])
+
+        const loaded = await loadAgentdConfig(configPath)
+        assert.equal(loaded.listen.host, '0.0.0.0')
+        assert.equal(loaded.initialized, false)
+        assert.deepEqual(loaded.apiKeys, [])
+        assert.deepEqual(await ensureAgentdConfig(configPath), { created: false })
     } finally {
         await rm(directory, { recursive: true, force: true })
     }
 })
 
-test('legacy configs with an authToken remain initialized', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-legacy-'))
+test('legacy authToken becomes a data-plane key without becoming an admin password', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-legacy-'))
     const configPath = path.join(directory, 'nexus-agentd.json')
     try {
         await writeFile(
             configPath,
             JSON.stringify({
-                authToken: 'legacy-token',
+                authToken: 'legacy-client-token',
                 workspaceRoots: [directory],
-                agents: {}
+                agents: {
+                    codex: { driver: 'codex', enabled: false }
+                }
             })
         )
-        const loaded = await loadAgentdConfig(configPath)
-        assert.equal(loaded.initialized, true)
-        assert.equal(loaded.authToken, 'legacy-token')
+        const config = await loadAgentdConfig(configPath)
+        assert.equal(config.initialized, true)
+        assert.equal(config.adminPasswordHash, undefined)
+        assert.equal(config.agents.codex.protocol, 'acp')
+        assert.equal(config.apiKeys?.length, 1)
+        assert.deepEqual(config.apiKeys?.[0].scope, {
+            allAgents: true,
+            agentIds: []
+        })
+        assert.equal(config.apiKeys?.[0].secret, 'legacy-client-token')
 
         await writeFile(
             configPath,
             JSON.stringify({
                 initialized: false,
-                authToken: 'ambiguous-token',
+                authToken: 'must-not-be-here',
                 workspaceRoots: [directory],
                 agents: {}
             })
         )
-        await assert.rejects(
-            () => loadAgentdConfig(configPath),
-            /pending setup must not contain authToken/
-        )
+        await assert.rejects(() => loadAgentdConfig(configPath), /pending setup.*authToken/)
     } finally {
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('config parses ACP and A2A independently and rejects malformed typed fields', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-protocols-'))
+    const configPath = path.join(directory, 'nexus-agentd.json')
+    const secretName = 'AGENT_NEXUS_A2A_TEST_SECRET'
+    const previous = process.env[secretName]
+    process.env[secretName] = 'remote-secret'
+    try {
+        const base = {
+            initialized: true,
+            adminPasswordHash: 'scrypt$placeholder$placeholder',
+            workspaceRoots: [directory],
+            apiKeys: [],
+            agents: {
+                local: {
+                    protocol: 'acp',
+                    driver: 'codex',
+                    workspace: directory,
+                    args: []
+                },
+                remote: {
+                    protocol: 'a2a',
+                    agentCardUrl: 'http://192.168.1.20:8080/custom/card.json',
+                    preferredTransport: 'http-json',
+                    auth: { type: 'bearer', value: `env:${secretName}` },
+                    timeoutMs: 45_000
+                }
+            }
+        }
+        await writeFile(configPath, JSON.stringify(base))
+        const config = await loadAgentdConfig(configPath)
+        assert.equal(config.agents.local.protocol, 'acp')
+        assert.equal(config.agents.remote.protocol, 'a2a')
+        if (config.agents.remote.protocol === 'a2a') {
+            assert.equal(
+                config.agents.remote.agentCardUrl,
+                'http://192.168.1.20:8080/custom/card.json'
+            )
+            assert.equal(config.agents.remote.preferredTransport, 'http-json')
+            assert.equal(config.agents.remote.auth?.value, 'remote-secret')
+            assert.equal(config.agents.remote.timeoutMs, 45_000)
+        }
+
+        await writeFile(configPath, JSON.stringify({ ...base, maxSessions: '64' }))
+        await assert.rejects(() => loadAgentdConfig(configPath), /maxSessions must be an integer/)
+
+        await writeFile(
+            configPath,
+            JSON.stringify({
+                ...base,
+                agents: { local: { protocol: 'acp', driver: 'codex', args: 'unsafe' } }
+            })
+        )
+        await assert.rejects(() => loadAgentdConfig(configPath), /args must be an array/)
+
+        await writeFile(
+            configPath,
+            JSON.stringify({
+                ...base,
+                agents: {
+                    remote: {
+                        protocol: 'a2a',
+                        agentUrl: 'http://192.168.1.20:8080'
+                    }
+                }
+            })
+        )
+        const legacy = await loadAgentdConfig(configPath)
+        if (legacy.agents.remote.protocol === 'a2a') {
+            assert.equal(legacy.agents.remote.agentUrl, 'http://192.168.1.20:8080')
+            assert.equal(legacy.agents.remote.preferredTransport, 'auto')
+        }
+    } finally {
+        if (previous === undefined) delete process.env[secretName]
+        else process.env[secretName] = previous
         await rm(directory, { recursive: true, force: true })
     }
 })

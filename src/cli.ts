@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path'
+import { networkInterfaces } from 'node:os'
 import { ensureAgentdConfig } from './config.js'
 import { startAgentd } from './index.js'
 
@@ -17,10 +18,10 @@ const label =
         ? `${address.address}:${address.port}`
         : String(address)
 console.log(`nexus-agentd listening on ${label}`)
-console.log(`WebUI: http://${displayHost(address)}:${displayPort(address)}/ui/`)
+for (const url of displayUrls(address)) console.log(`WebUI: ${url}`)
 if (bootstrap.created) {
     console.log(`Created config: ${configPath}`)
-    console.log('Setup required: open the WebUI and choose your Gateway Access Key.')
+    console.log('Setup required: open the WebUI and create the Console Password.')
     if (runtime.config.listen.host !== '127.0.0.1' && runtime.config.listen.host !== '::1') {
         console.warn(
             'WARNING: first-run setup is reachable over the network; initialize it immediately on a trusted network.'
@@ -66,4 +67,22 @@ function displayHost(address: ReturnType<typeof runtime.server.address>) {
 
 function displayPort(address: ReturnType<typeof runtime.server.address>) {
     return address && typeof address === 'object' ? address.port : runtime.config.listen.port
+}
+
+function displayUrls(address: ReturnType<typeof runtime.server.address>) {
+    const port = displayPort(address)
+    if (
+        address &&
+        typeof address === 'object' &&
+        (address.address === '0.0.0.0' || address.address === '::')
+    ) {
+        const hosts = new Set(['127.0.0.1'])
+        for (const entries of Object.values(networkInterfaces())) {
+            for (const entry of entries || []) {
+                if (entry.family === 'IPv4' && !entry.internal) hosts.add(entry.address)
+            }
+        }
+        return Array.from(hosts).map((host) => `http://${host}:${port}/ui/`)
+    }
+    return [`http://${displayHost(address)}:${port}/ui/`]
 }

@@ -10,6 +10,7 @@ import type { AgentDriver } from './types.js'
 export function createDriverRegistry(config: AgentdConfig) {
     const drivers = new Map<string, AgentDriver>()
     for (const [id, driver] of Object.entries(config.agents)) {
+        if (driver.protocol === 'a2a') continue
         if (driver.enabled === false) continue
         switch (driver.driver) {
             case 'opencode':
