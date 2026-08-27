@@ -136,11 +136,16 @@ export const app = String.raw`
     const missingAgent = /^Configured agent not found: (.+)$/.exec(message)
     if (missingAgent) return '未找到已配置的智能体：' + missingAgent[1]
     const timeout = /^timeout must be between (\d+) and (\d+)$/.exec(message)
-    if (timeout) return '超时时间必须介于 ' + timeout[1] + ' 和 ' + timeout[2] + ' 毫秒之间'
+    if (timeout) return '超时时间必须介于 ' + Math.round(Number(timeout[1]) / 1000) + ' 和 ' + Math.round(Number(timeout[2]) / 1000) + ' 秒之间'
     const runtimeRange = /^(sessionTtlMs|promptTimeoutMs|cleanupIntervalMs) must be between (\d+) and (\d+)$/.exec(message)
     if (runtimeRange) {
-      const labels = { sessionTtlMs: 'Session 空闲有效期', promptTimeoutMs: 'ACP 任务超时', cleanupIntervalMs: '清理任务周期' }
-      return labels[runtimeRange[1]] + '必须介于 ' + runtimeRange[2] + ' 和 ' + runtimeRange[3] + ' 毫秒之间'
+      const units = {
+        sessionTtlMs: ['Session 空闲有效期', '小时', 3_600_000],
+        promptTimeoutMs: ['ACP 任务超时', '分钟', 60_000],
+        cleanupIntervalMs: ['清理任务周期', '秒', 1000]
+      }
+      const [label, unit, divisor] = units[runtimeRange[1]]
+      return label + '必须介于 ' + Math.round(Number(runtimeRange[2]) / divisor) + ' 和 ' + Math.round(Number(runtimeRange[3]) / divisor) + ' ' + unit + '之间'
     }
     return message
   }
@@ -531,6 +536,8 @@ export const app = String.raw`
   function openAgentDrawer(agent) {
     const editing = Boolean(agent)
     const current = agent || { protocol: 'acp', enabled: true, permissionPolicy: 'ask', permissionTimeoutMs: 900000, timeoutMs: 60000 }
+    const permissionTimeoutSeconds = Math.max(1, Math.round(Number(current.permissionTimeoutMs || 900000) / 1000))
+    const requestTimeoutSeconds = Math.max(1, Math.round(Number(current.timeoutMs || 60000) / 1000))
     const drivers = state.config.driverKinds.map((driver) => '<option value="' + escapeHtml(driver) + '"' + selected(current.driver || state.config.driverKinds[0], driver) + '>' + escapeHtml(driver) + '</option>').join('')
     const roots = state.config.workspaceRoots.map((root) => '<option value="' + escapeHtml(root) + '"></option>').join('')
     const body =
@@ -538,8 +545,8 @@ export const app = String.raw`
       '<div class="field-row"><label>协议<select name="protocol"><option value="acp"' + selected(current.protocol, 'acp') + '>ACP</option><option value="a2a"' + selected(current.protocol, 'a2a') + '>A2A</option></select></label><label class="checkbox"><input name="enabled" type="checkbox"' + checked(current.enabled) + '>启用</label></div>' +
       '<label>名称<input name="name" value="' + escapeHtml(current.name || '') + '" required></label>' +
       '<label>描述<textarea name="description">' + escapeHtml(current.description || '') + '</textarea></label>' +
-      '<div data-protocol-section="acp"><label>驱动<select name="driver">' + drivers + '</select></label><label>工作区<input name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></label><div class="field-row"><label>权限策略<select name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></label><label>权限确认超时（毫秒）<input name="permissionTimeoutMs" type="number" min="1000" value="' + escapeHtml(current.permissionTimeoutMs || 900000) + '"></label></div></div>' +
-      '<div data-protocol-section="a2a"><label>Agent Card URL<input name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">填写完整的 Agent Card JSON 地址；调用地址和能力将从 Card 自动发现。</small></label><div class="field-row"><label>首选传输<select name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></label><label>认证方式<select name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></label></div><label data-auth-header>请求头名称<input name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></label><label data-auth-value><span data-auth-value-label>认证凭据</span><input name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></label><label>请求超时（毫秒）<input name="timeoutMs" type="number" min="1000" max="1800000" value="' + escapeHtml(current.timeoutMs || 60000) + '"><small class="field-help">默认 60 秒；用于限制这个 A2A Agent 的单次请求，最大 30 分钟。</small></label></div>'
+      '<div data-protocol-section="acp"><label>驱动<select name="driver">' + drivers + '</select></label><label>工作区<input name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></label><div class="field-row"><label>权限策略<select name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></label><label>权限确认超时（秒）<input name="permissionTimeoutMs" type="number" min="1" max="86400" step="1" value="' + escapeHtml(permissionTimeoutSeconds) + '"><small class="field-help">单位：秒；默认 900 秒，最长 24 小时。</small></label></div></div>' +
+      '<div data-protocol-section="a2a"><label>Agent Card URL<input name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">填写完整的 Agent Card JSON 地址；调用地址和能力将从 Card 自动发现。</small></label><div class="field-row"><label>首选传输<select name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></label><label>认证方式<select name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></label></div><label data-auth-header>请求头名称<input name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></label><label data-auth-value><span data-auth-value-label>认证凭据</span><input name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></label><label>请求超时（秒）<input name="timeoutMs" type="number" min="1" max="1800" step="1" value="' + escapeHtml(requestTimeoutSeconds) + '"><small class="field-help">单位：秒；默认 60 秒；用于限制这个 A2A Agent 的单次请求，最大 1800 秒（30 分钟）。</small></label></div>'
     openDrawer(editing ? '编辑智能体' : '添加智能体', body, editing ? '保存修改' : '添加智能体', async (form) => {
       const data = new FormData(form)
       const protocol = data.get('protocol')
@@ -554,7 +561,7 @@ export const app = String.raw`
         payload.driver = data.get('driver')
         payload.workspace = String(data.get('workspace') || '').trim()
         payload.permissionPolicy = data.get('permissionPolicy')
-        payload.permissionTimeoutMs = Number(data.get('permissionTimeoutMs'))
+        payload.permissionTimeoutMs = Number(data.get('permissionTimeoutMs')) * 1000
       } else {
         payload.agentCardUrl = String(data.get('agentCardUrl') || '').trim()
         payload.preferredTransport = data.get('preferredTransport')
@@ -562,7 +569,7 @@ export const app = String.raw`
         payload.authHeaderName = String(data.get('authHeaderName') || '').trim()
         const authValue = String(data.get('authValue') || '')
         if (authValue) payload.authValue = authValue
-        payload.timeoutMs = Number(data.get('timeoutMs'))
+        payload.timeoutMs = Number(data.get('timeoutMs')) * 1000
       }
       await api('/v1/admin/agents/' + encodeURIComponent(id), { method: 'PUT', body: payload })
       closeDrawer()
