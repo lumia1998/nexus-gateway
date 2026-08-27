@@ -27,6 +27,8 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         }
         assert.match(html, /Session 空闲有效期（小时）/)
         assert.match(html, /清理任务周期（秒）/)
+        assert.match(html, /权限确认超时（秒）/)
+        assert.match(html, /请求超时（秒）/)
         const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
         assert.ok(script)
         assert.doesNotThrow(() => new Function(script))
