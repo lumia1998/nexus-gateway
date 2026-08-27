@@ -24,7 +24,8 @@ export const app = String.raw`
     runs: ['运行记录', '追踪当前任务进度，并查看已完成或失败的历史任务。'],
     agents: ['智能体', '配置本地 ACP 进程和远程 A2A 智能体。'],
     workspaces: ['工作区', '管理 ACP 智能体允许访问的路径。'],
-    keys: ['API 密钥', '管理 Agent Nexus 数据接口的客户端凭据。']
+    keys: ['API 密钥', '管理 Agent Nexus 数据接口的客户端凭据。'],
+    settings: ['运行设置', '调整会话生命周期、任务超时和后台清理周期。']
   }
 
   const actionIcons = {
@@ -136,6 +137,11 @@ export const app = String.raw`
     if (missingAgent) return '未找到已配置的智能体：' + missingAgent[1]
     const timeout = /^timeout must be between (\d+) and (\d+)$/.exec(message)
     if (timeout) return '超时时间必须介于 ' + timeout[1] + ' 和 ' + timeout[2] + ' 毫秒之间'
+    const runtimeRange = /^(sessionTtlMs|promptTimeoutMs|cleanupIntervalMs) must be between (\d+) and (\d+)$/.exec(message)
+    if (runtimeRange) {
+      const labels = { sessionTtlMs: 'Session 空闲有效期', promptTimeoutMs: 'ACP 任务超时', cleanupIntervalMs: '清理任务周期' }
+      return labels[runtimeRange[1]] + '必须介于 ' + runtimeRange[2] + ' 和 ' + runtimeRange[3] + ' 毫秒之间'
+    }
     return message
   }
 
@@ -231,6 +237,37 @@ export const app = String.raw`
     if (state.page === 'agents') renderAgents()
     if (state.page === 'workspaces') renderWorkspaces()
     if (state.page === 'keys') renderApiKeys()
+    if (state.page === 'settings') renderSettings()
+  }
+
+  function renderSettings() {
+    const sessionTtlHours = Math.round((state.config.sessionTtlMs || 24 * 60 * 60 * 1000) / 3_600_000)
+    const promptTimeoutMinutes = Math.round((state.config.promptTimeoutMs || 30 * 60 * 1000) / 60_000)
+    const cleanupIntervalSeconds = Math.round((state.config.cleanupIntervalMs || 60_000) / 1000)
+    actions.innerHTML = '<span class="muted">修改后立即生效，新任务按新参数执行</span>'
+    content.innerHTML =
+      '<div class="settings-layout"><section class="panel settings-form"><div class="panel-header"><div><h2>运行生命周期</h2><p class="settings-subtitle">这些参数由网关统一管理，重启后仍会保留。</p></div></div>' +
+      '<div class="settings-fields">' +
+      '<label>Session 空闲有效期（小时）<input id="session-ttl-hours" type="number" min="1" max="720" step="1" value="' + escapeHtml(sessionTtlHours) + '"><small class="field-help">Session 在没有新消息、授权或输入交互后，超过此时间会被释放。默认 24 小时。</small></label>' +
+      '<label>单次 ACP 任务超时（分钟）<input id="prompt-timeout-minutes" type="number" min="1" max="1440" step="1" value="' + escapeHtml(promptTimeoutMinutes) + '"><small class="field-help">单次 ACP prompt 的最长运行时间。默认 30 分钟；超时后任务会记录为失败并释放运行资源。</small></label>' +
+      '<label>清理任务周期（秒）<input id="cleanup-interval-seconds" type="number" min="5" max="3600" step="1" value="' + escapeHtml(cleanupIntervalSeconds) + '"><small class="field-help">网关扫描空闲 Session、过期运行记录和临时输入文件的间隔。默认每 60 秒执行一次。</small></label>' +
+      '</div><div class="settings-divider"></div><div class="settings-note"><strong>A2A 请求超时</strong><span>在“智能体 → 编辑 → A2A → 请求超时”中单独配置。默认 60 秒，最大 30 分钟，不受 ACP 全局任务超时字段覆盖。</span></div><div class="settings-actions"><button id="save-runtime-settings" class="button primary">保存运行设置</button></div></section></div>'
+    byId('save-runtime-settings').onclick = async () => {
+      const values = {
+        sessionTtlMs: Number(byId('session-ttl-hours').value) * 3_600_000,
+        promptTimeoutMs: Number(byId('prompt-timeout-minutes').value) * 60_000,
+        cleanupIntervalMs: Number(byId('cleanup-interval-seconds').value) * 1000
+      }
+      if (!Object.values(values).every((value) => Number.isInteger(value) && value > 0)) {
+        toast('请输入有效的整数运行参数。', true)
+        return
+      }
+      await runAction(async () => {
+        state.config = await api('/v1/admin/config/runtime', { method: 'PUT', body: values })
+        render()
+        toast('运行设置已保存并立即生效')
+      })
+    }
   }
 
   function renderRuns() {
@@ -310,7 +347,7 @@ export const app = String.raw`
       detailItem('智能体', run.agentName) + detailItem('状态', runStatusLabel(run.state)) +
       detailItem('开始时间', formatDate(run.startedAt)) + detailItem('耗时', formatDuration(run)) +
       detailItem('协议', run.protocol.toUpperCase()) + detailItem('运行 ID', run.id) +
-      detailItem('当前阶段', run.progress && run.progress.phase || '—') + detailItem('产物', run.artifactCount || 0) +
+      detailItem('当前阶段', run.progress && run.progress.phase || '—') + detailItem('输入附件', run.inputAttachmentCount || 0) + detailItem('产物', run.artifactCount || 0) +
       '</div><div class="run-detail-block"><h3>用户任务</h3><pre class="run-detail-code">' + escapeHtml(run.task) + (run.taskTruncated ? '\n\n[记录已截断]' : '') + '</pre></div>' +
       (run.progress && run.progress.message ? '<div class="run-detail-block"><h3>最近进度</h3><pre class="run-detail-code">' + escapeHtml(run.progress.message) + '</pre></div>' : '') +
       (run.output ? '<div class="run-detail-block"><h3>智能体结果</h3><pre class="run-detail-code">' + escapeHtml(run.output) + '</pre></div>' : '') +
@@ -502,7 +539,7 @@ export const app = String.raw`
       '<label>名称<input name="name" value="' + escapeHtml(current.name || '') + '" required></label>' +
       '<label>描述<textarea name="description">' + escapeHtml(current.description || '') + '</textarea></label>' +
       '<div data-protocol-section="acp"><label>驱动<select name="driver">' + drivers + '</select></label><label>工作区<input name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></label><div class="field-row"><label>权限策略<select name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></label><label>权限确认超时（毫秒）<input name="permissionTimeoutMs" type="number" min="1000" value="' + escapeHtml(current.permissionTimeoutMs || 900000) + '"></label></div></div>' +
-      '<div data-protocol-section="a2a"><label>Agent Card URL<input name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">填写完整的 Agent Card JSON 地址；调用地址和能力将从 Card 自动发现。</small></label><div class="field-row"><label>首选传输<select name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></label><label>认证方式<select name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></label></div><label data-auth-header>请求头名称<input name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></label><label data-auth-value><span data-auth-value-label>认证凭据</span><input name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></label><label>请求超时（毫秒）<input name="timeoutMs" type="number" min="1000" value="' + escapeHtml(current.timeoutMs || 60000) + '"></label></div>'
+      '<div data-protocol-section="a2a"><label>Agent Card URL<input name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">填写完整的 Agent Card JSON 地址；调用地址和能力将从 Card 自动发现。</small></label><div class="field-row"><label>首选传输<select name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></label><label>认证方式<select name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></label></div><label data-auth-header>请求头名称<input name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></label><label data-auth-value><span data-auth-value-label>认证凭据</span><input name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></label><label>请求超时（毫秒）<input name="timeoutMs" type="number" min="1000" max="1800000" value="' + escapeHtml(current.timeoutMs || 60000) + '"><small class="field-help">默认 60 秒；用于限制这个 A2A Agent 的单次请求，最大 30 分钟。</small></label></div>'
     openDrawer(editing ? '编辑智能体' : '添加智能体', body, editing ? '保存修改' : '添加智能体', async (form) => {
       const data = new FormData(form)
       const protocol = data.get('protocol')

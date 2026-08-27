@@ -157,6 +157,24 @@ test('captures image content from ACP tool updates as an artifact', () => {
     ])
 })
 
+test('maps supported ACP image input to an inline prompt block', async () => {
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(driver(), sink as any)
+    ;(runtime as any).promptCapabilities = { image: true }
+    const blocks = await (runtime as any).promptBlocks('看这张图', [
+        {
+            id: 'input-1',
+            name: '截图.png',
+            mediaType: 'image/png',
+            bytes: Buffer.from([0, 255, 1])
+        }
+    ])
+    assert.deepEqual(blocks, [
+        { type: 'text', text: '看这张图' },
+        { type: 'image', data: Buffer.from([0, 255, 1]).toString('base64'), mimeType: 'image/png' }
+    ])
+})
+
 function driver() {
     return {
         id: 'opencode',

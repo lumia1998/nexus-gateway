@@ -1,10 +1,17 @@
 import { randomUUID } from 'node:crypto'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import { pathToFileURL } from 'node:url'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as acp from '@agentclientprotocol/sdk'
 import type { AgentDriver } from '../drivers/index.js'
 import type { AcpSessionSink } from '../session-contract.js'
-import type { AgentdArtifact, AgentdPendingRequest } from '../types.js'
+import type {
+    AgentdArtifact,
+    AgentdInputAttachment,
+    AgentdPendingRequest
+} from '../types.js'
 
 interface PendingPermission {
     request: AgentdPendingRequest
@@ -34,6 +41,8 @@ export class AcpProcessRuntime {
     private prompting = false
     private readonly maxStderrChunkChars: number
     private readonly promptTimeoutMs: number
+    private promptCapabilities: acp.PromptCapabilities = {}
+    private inputDirectory?: string
 
     constructor(
         private readonly driver: AgentDriver,
@@ -50,6 +59,7 @@ export class AcpProcessRuntime {
 
     async start(workspace: string) {
         if (this.process) throw new Error('ACP runtime is already started')
+        this.inputDirectory = path.join(workspace, '.nexus-inputs', this.sink.id)
         const child = this.driver.spawn(workspace)
         this.process = child
         this.captureStderr(child)
@@ -102,6 +112,7 @@ export class AcpProcessRuntime {
                 text: `ACP negotiated protocol ${initialize.protocolVersion}`
             })
         }
+        this.promptCapabilities = initialize.agentCapabilities?.promptCapabilities || {}
         const session = await this.connection.agent.request(
             acp.methods.agent.session.new,
             {
@@ -113,7 +124,7 @@ export class AcpProcessRuntime {
         this.sink.setState('created')
     }
 
-    async prompt(message: string) {
+    async prompt(message: string, attachments: AgentdInputAttachment[] = []) {
         if (!this.connection) throw new Error('ACP runtime is not connected')
         if (this.prompting) throw new Error('ACP session is already processing a prompt')
         const sessionId = this.requireSessionId()
@@ -124,7 +135,7 @@ export class AcpProcessRuntime {
             const response = await withTimeout(
                 this.connection.agent.request(acp.methods.agent.session.prompt, {
                     sessionId,
-                    prompt: [{ type: 'text', text: message }]
+                    prompt: await this.promptBlocks(message, attachments)
                 }),
                 this.promptTimeoutMs,
                 'ACP prompt timed out'
@@ -152,7 +163,7 @@ export class AcpProcessRuntime {
         }
     }
 
-    async respondPending(message: string) {
+    async respondPending(message: string, _attachments: AgentdInputAttachment[] = []) {
         if (this.pendingInput) {
             this.finishInput(message)
             return
@@ -232,6 +243,10 @@ export class AcpProcessRuntime {
         }
         this.connection?.close()
         this.connection = undefined
+        if (this.inputDirectory) {
+            await rm(this.inputDirectory, { recursive: true, force: true }).catch(() => undefined)
+            this.inputDirectory = undefined
+        }
         const child = this.process
         this.process = undefined
         if (child && child.exitCode === null && child.signalCode === null) {
@@ -480,9 +495,61 @@ export class AcpProcessRuntime {
         }
         return value
     }
+
+    private async promptBlocks(message: string, attachments: AgentdInputAttachment[]) {
+        const blocks: acp.ContentBlock[] = [{ type: 'text', text: message }]
+        for (const attachment of attachments) {
+            const mediaType = attachment.mediaType || 'application/octet-stream'
+            const data = attachment.bytes.toString('base64')
+            if (mediaType.startsWith('image/') && this.promptCapabilities.image) {
+                blocks.push({ type: 'image', data, mimeType: mediaType })
+                continue
+            }
+            if (mediaType.startsWith('audio/') && this.promptCapabilities.audio) {
+                blocks.push({ type: 'audio', data, mimeType: mediaType })
+                continue
+            }
+            if (this.promptCapabilities.embeddedContext) {
+                blocks.push({
+                    type: 'resource',
+                    resource: {
+                        uri: `nexus-input://${this.sink.id}/${encodeURIComponent(attachment.name)}`,
+                        blob: data,
+                        mimeType: mediaType
+                    }
+                })
+                continue
+            }
+            blocks.push(await this.writeResourceLink(attachment, mediaType))
+        }
+        return blocks
+    }
+
+    private async writeResourceLink(attachment: AgentdInputAttachment, mediaType: string) {
+        const directory = this.inputDirectory || path.join(process.cwd(), '.nexus-inputs', this.sink.id)
+        this.inputDirectory = directory
+        await mkdir(directory, { recursive: true })
+        const filename = `${attachment.id}-${safeFilename(attachment.name) || 'attachment'}`
+        const filePath = path.join(directory, filename)
+        await writeFile(filePath, attachment.bytes, { mode: 0o600 })
+        return {
+            type: 'resource_link' as const,
+            name: attachment.name,
+            uri: pathToFileURL(filePath).toString(),
+            mimeType: mediaType,
+            size: attachment.bytes.length
+        }
+    }
 }
 
 class PromptTimeoutError extends Error {}
+
+function safeFilename(value: string) {
+    return String(value || '')
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+        .trim()
+        .slice(0, 180)
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
     let timer: NodeJS.Timeout | undefined

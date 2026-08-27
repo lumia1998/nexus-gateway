@@ -33,6 +33,7 @@ export const markup = String.raw`
       <button class="nav-item" data-page="agents">${icons.agents}<span>智能体</span></button>
       <button class="nav-item" data-page="workspaces">${icons.workspaces}<span>工作区</span></button>
       <button class="nav-item" data-page="keys">${icons.keys}<span>API 密钥</span></button>
+      <button class="nav-item" data-page="settings">${icons.settings}<span>运行设置</span></button>
     </nav>
     <div class="admin-menu-wrap">
       <div id="admin-popover" class="admin-popover hidden">

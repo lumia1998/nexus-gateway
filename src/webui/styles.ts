@@ -219,6 +219,18 @@ tr:last-child td { border-bottom: 0; }
 .drawer-footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; }
 .field-help { margin-top: -2px; color: var(--text-muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.settings-layout { display: grid; grid-template-columns: minmax(0, 760px); }
+.settings-form { overflow: hidden; }
+.settings-form .panel-header { align-items: flex-start; padding-top: 16px; padding-bottom: 14px; }
+.settings-form .panel-header h2 { font-size: 16px; }
+.settings-subtitle { margin: 5px 0 0; color: var(--text-muted); font-size: 12px; }
+.settings-fields { display: grid; gap: 18px; padding: 20px 16px 4px; }
+.settings-fields label { gap: 7px; }
+.settings-fields input { max-width: 260px; }
+.settings-divider { height: 1px; margin: 18px 16px 0; background: var(--border); }
+.settings-note { display: grid; gap: 4px; margin: 16px; padding: 12px; border-radius: var(--radius-small); background: var(--surface-subtle); color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.settings-note strong { color: var(--text); font-size: 13px; }
+.settings-actions { display: flex; justify-content: flex-end; padding: 0 16px 16px; }
 .checkbox { display: flex; align-items: center; gap: 8px; min-height: 34px; }
 .checkbox input { width: 16px; min-height: 16px; }
 .agent-scope { max-height: 170px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-small); }

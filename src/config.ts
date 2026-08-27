@@ -37,6 +37,9 @@ export async function ensureAgentdConfig(
         },
         initialized: false,
         workspaceRoots: [path.resolve(options.workspace || process.cwd())],
+        sessionTtlMs: 24 * 60 * 60 * 1000,
+        promptTimeoutMs: 30 * 60 * 1000,
+        cleanupIntervalMs: 60_000,
         apiKeys: [],
         agents: {}
     }
@@ -128,6 +131,13 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
             1024,
             16 * 1024 * 1024
         ),
+        maxAttachmentBytes: integerValue(
+            value.maxAttachmentBytes,
+            'maxAttachmentBytes',
+            32 * 1024 * 1024,
+            1024,
+            64 * 1024 * 1024
+        ),
         maxEventsPerSession: integerValue(
             value.maxEventsPerSession,
             'maxEventsPerSession',
@@ -148,6 +158,13 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
             24 * 60 * 60 * 1000,
             60_000,
             30 * 24 * 60 * 60 * 1000
+        ),
+        cleanupIntervalMs: integerValue(
+            value.cleanupIntervalMs,
+            'cleanupIntervalMs',
+            60_000,
+            5_000,
+            60 * 60 * 1000
         ),
         requestTimeoutMs: integerValue(
             value.requestTimeoutMs,

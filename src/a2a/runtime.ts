@@ -18,7 +18,12 @@ import {
     RestTransportFactory
 } from '@a2a-js/sdk/client'
 import type { AgentSessionRuntime, AgentSessionSink } from '../session-contract.js'
-import type { AgentdA2AConfig, AgentdAgentView, AgentdArtifact } from '../types.js'
+import type {
+    AgentdA2AConfig,
+    AgentdAgentView,
+    AgentdArtifact,
+    AgentdInputAttachment
+} from '../types.js'
 
 export async function probeA2AAgent(
     id: string,
@@ -89,7 +94,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.sink.setState('created')
     }
 
-    async prompt(message: string) {
+    async prompt(message: string, attachments: AgentdInputAttachment[] = []) {
         if (!this.client || !this.card) throw new Error('A2A runtime is not connected')
         if (this.prompting) throw new Error('A2A session is already processing a message')
         if (this.disposed) throw new Error('A2A runtime is disposed')
@@ -104,7 +109,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         )
         timer.unref?.()
         try {
-            const request = this.messageRequest(message)
+            const request = this.messageRequest(message, attachments)
             for await (const response of this.client.sendMessageStream(request, {
                 signal: controller.signal
             })) {
@@ -122,12 +127,12 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         }
     }
 
-    async respondPending(message: string) {
+    async respondPending(message: string, attachments: AgentdInputAttachment[] = []) {
         if (this.sink.state !== 'input_required') {
             throw new Error('A2A session is not waiting for input')
         }
         this.sink.clearPending()
-        await this.prompt(message)
+        await this.prompt(message, attachments)
     }
 
     async cancel() {
@@ -155,7 +160,10 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.activeController = undefined
     }
 
-    private messageRequest(text: string): SendMessageRequest {
+    private messageRequest(
+        text: string,
+        attachments: AgentdInputAttachment[]
+    ): SendMessageRequest {
         return {
             tenant: '',
             message: {
@@ -169,14 +177,25 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                         metadata: undefined,
                         filename: '',
                         mediaType: 'text/plain'
-                    }
+                    },
+                    ...attachments.map((attachment): Part => ({
+                        content: {
+                            $case: 'raw',
+                            value: Buffer.from(attachment.bytes)
+                        },
+                        metadata: undefined,
+                        filename: attachment.name,
+                        mediaType: attachment.mediaType || 'application/octet-stream'
+                    }))
                 ],
                 metadata: undefined,
                 extensions: [],
                 referenceTaskIds: []
             },
             configuration: {
-                acceptedOutputModes: ['text/plain'],
+                acceptedOutputModes: this.card?.defaultOutputModes?.length
+                    ? [...this.card.defaultOutputModes]
+                    : ['text/plain', 'application/octet-stream'],
                 taskPushNotificationConfig: undefined,
                 returnImmediately: false
             },

@@ -1,6 +1,7 @@
 import type {
     AgentdArtifact,
     AgentdEventType,
+    AgentdInputAttachment,
     AgentdPendingRequest,
     AgentdSessionState
 } from './types.js'
@@ -25,8 +26,8 @@ export interface AcpSessionSink extends AgentSessionSink {
 
 export interface AgentSessionRuntime {
     start(workspace?: string): Promise<void>
-    prompt(message: string): Promise<void>
-    respondPending(message: string): Promise<void>
+    prompt(message: string, attachments?: AgentdInputAttachment[]): Promise<void>
+    respondPending(message: string, attachments?: AgentdInputAttachment[]): Promise<void>
     cancel(): Promise<void>
     dispose(): Promise<void>
 }

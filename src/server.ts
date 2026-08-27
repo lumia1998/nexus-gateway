@@ -5,6 +5,7 @@ import {
     ControlPlaneError,
     type AgentdAgentUpdate,
     type AgentdApiKeyUpdate,
+    type AgentdRuntimeSettingsUpdate,
     type AgentdControlPlane
 } from './control-plane.js'
 import {
@@ -235,6 +236,31 @@ async function handleRequest(context: RequestContext) {
         return
     }
 
+    const attachmentMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/attachments$/)
+    if (attachmentMatch && request.method === 'POST') {
+        const sessionId = decodeURIComponent(attachmentMatch[1])
+        const session = sessions.get(sessionId)
+        if (!sessions.owns(sessionId, principal.id)) {
+            throw new RequestError(404, 'Session not found')
+        }
+        assertAgentScope(principal, session.agentId)
+        const bytes = await readBytesBody(
+            request,
+            config.maxAttachmentBytes || 32 * 1024 * 1024
+        )
+        writeJson(
+            response,
+            201,
+            sessions.addInputAttachment(
+                sessionId,
+                decodeHeader(request.headers['x-nexus-file-name']) || 'attachment',
+                normalizedMediaType(request.headers['content-type']),
+                bytes
+            )
+        )
+        return
+    }
+
     const match = url.pathname.match(
         /^\/v1\/sessions\/([^/]+)(?:\/(message|cancel|events))?$/
     )
@@ -254,11 +280,15 @@ async function handleRequest(context: RequestContext) {
     if (action === 'message' && request.method === 'POST') {
         assertJsonContentType(request)
         const body = await readJsonBody(request, config.maxRequestBytes)
-        assertOnlyKeys(body, ['message'])
+        assertOnlyKeys(body, ['message', 'attachments'])
         writeJson(
             response,
             202,
-            await sessions.message(sessionId, requiredMessage(body.message))
+            await sessions.message(
+                sessionId,
+                requiredMessage(body.message),
+                optionalAttachmentIds(body.attachments)
+            )
         )
         return
     }
@@ -334,6 +364,17 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
             await controlPlane.putWorkspaceRoots(
                 requiredStringArray(body.workspaceRoots, 'workspaceRoots')
             )
+        )
+        return
+    }
+    if (url.pathname === '/v1/admin/config/runtime' && request.method === 'PUT') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['sessionTtlMs', 'promptTimeoutMs', 'cleanupIntervalMs'])
+        writeJson(
+            response,
+            200,
+            await controlPlane.putRuntimeSettings(readRuntimeSettingsUpdate(body))
         )
         return
     }
@@ -453,6 +494,14 @@ function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
         authValue: optionalRawString(body.authValue, 'authValue'),
         authHeaderName: optionalString(body.authHeaderName),
         timeoutMs: optionalNumber(body.timeoutMs, 'timeoutMs')
+    }
+}
+
+function readRuntimeSettingsUpdate(body: Record<string, unknown>): AgentdRuntimeSettingsUpdate {
+    return {
+        sessionTtlMs: requiredInteger(body.sessionTtlMs, 'sessionTtlMs'),
+        promptTimeoutMs: requiredInteger(body.promptTimeoutMs, 'promptTimeoutMs'),
+        cleanupIntervalMs: requiredInteger(body.cleanupIntervalMs, 'cleanupIntervalMs')
     }
 }
 
@@ -639,6 +688,22 @@ async function readJsonBody(request: IncomingMessage, maxBytes: number) {
     }
 }
 
+async function readBytesBody(request: IncomingMessage, maxBytes: number) {
+    const declared = Number(request.headers['content-length'])
+    if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new RequestError(413, 'Request body is too large')
+    }
+    const chunks: Buffer[] = []
+    let total = 0
+    for await (const value of request) {
+        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+        total += chunk.length
+        if (total > maxBytes) throw new RequestError(413, 'Request body is too large')
+        chunks.push(chunk)
+    }
+    return Buffer.concat(chunks)
+}
+
 function assertOnlyKeys(body: Record<string, unknown>, allowed: string[]) {
     const accepted = new Set(allowed)
     const unknown = Object.keys(body).filter((key) => !accepted.has(key))
@@ -663,6 +728,36 @@ function requiredMessage(value: unknown) {
         throw new RequestError(400, 'message is required')
     }
     return value
+}
+
+function requiredInteger(value: unknown, name: string) {
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+        throw new RequestError(400, `${name} must be an integer`)
+    }
+    return value
+}
+
+function optionalAttachmentIds(value: unknown) {
+    if (value === undefined) return []
+    if (!Array.isArray(value) || value.length > 16) {
+        throw new RequestError(400, 'attachments must be an array with at most 16 ids')
+    }
+    return value.map((item) => requiredString(item, 'attachments'))
+}
+
+function normalizedMediaType(value: string | string[] | undefined) {
+    const mediaType = stringHeader(value).split(';', 1)[0].trim().toLowerCase()
+    return mediaType || undefined
+}
+
+function decodeHeader(value: string | string[] | undefined) {
+    const raw = stringHeader(value)
+    if (!raw) return ''
+    try {
+        return decodeURIComponent(raw)
+    } catch {
+        return raw
+    }
 }
 
 function cleanQuery(value: string | null) {
