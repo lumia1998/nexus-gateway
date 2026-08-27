@@ -86,9 +86,11 @@ export interface AgentdConfig {
     apiKeys?: AgentdApiKeyConfig[]
     workspaceRoots: string[]
     maxRequestBytes: number
+    maxAttachmentBytes?: number
     maxEventsPerSession: number
     maxOutputChars: number
     sessionTtlMs: number
+    cleanupIntervalMs?: number
     requestTimeoutMs?: number
     promptTimeoutMs?: number
     maxSessions?: number
@@ -138,7 +140,24 @@ export interface AgentdAgentConfigView {
 export interface AgentdControlPlaneView {
     workspaceRoots: string[]
     driverKinds: AgentdDriverKind[]
+    sessionTtlMs: number
+    promptTimeoutMs: number
+    cleanupIntervalMs: number
     agents: AgentdAgentConfigView[]
+}
+
+export interface AgentdInputAttachmentView {
+    id: string
+    name: string
+    mediaType?: string
+    size: number
+}
+
+export interface AgentdInputAttachment {
+    id: string
+    name: string
+    mediaType?: string
+    bytes: Buffer
 }
 
 export interface AgentdApiKeyView {
@@ -194,6 +213,7 @@ export interface AgentdSessionView {
     output?: string
     error?: string
     artifacts: AgentdArtifact[]
+    inputAttachments?: AgentdInputAttachmentView[]
     pendingRequest?: AgentdPendingRequest
     lastEventId?: string
     createdAt: number
@@ -231,6 +251,7 @@ export interface AgentdRunView {
     resultSummary?: string
     error?: string
     artifactCount: number
+    inputAttachmentCount?: number
     startedAt: number
     updatedAt: number
     endedAt?: number

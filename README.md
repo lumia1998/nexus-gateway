@@ -49,7 +49,7 @@ Workspace 配置保持不变。
 
 ## WebUI
 
-固定侧栏有总览、运行记录、智能体、工作区和 API 密钥五个主页面。管理员菜单位于侧栏底部，
+固定侧栏有总览、运行记录、智能体、工作区、API 密钥和运行设置六个主页面。管理员菜单位于侧栏底部，
 提供 Light / Dark / System 主题、修改密码和退出登录。
 
 - Overview 只显示真实 Agent、Ready 和当前内存 Session 数量。
@@ -58,6 +58,9 @@ Workspace 配置保持不变。
 - Agents 支持本地 ACP 与远程 A2A；readiness 每 20 秒自动刷新，也可手动刷新。
 - Workspaces 管理 ACP 的 realpath allowlist；A2A 不使用本地 Workspace。
 - API Keys 显示真实状态和最后使用时间，并提供独立的显式 reveal 操作。
+- 运行设置可以直接修改 Session 空闲有效期、ACP 单次任务超时和清理任务周期，保存后立即热生效。
+  默认值分别是 24 小时、30 分钟和 60 秒；A2A 请求超时在每个 Agent 的编辑页单独设置，默认 60 秒、
+  最大 30 分钟。
 
 ## Agent 协议
 
@@ -119,14 +122,21 @@ A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现
 ```json
 {
   "maxRequestBytes": 1048576,
+  "maxAttachmentBytes": 33554432,
   "requestTimeoutMs": 30000,
   "promptTimeoutMs": 1800000,
+  "cleanupIntervalMs": 60000,
   "maxSessions": 64,
   "maxSseConnections": 128,
   "maxConnections": 256,
   "sessionTtlMs": 86400000
 }
 ```
+
+输入附件通过 Session 临时保存，默认单个文件最多 16 MiB、单个 Session 最多 32 MiB、最多 16 个文件；
+HTTP 上传总上限由 `maxAttachmentBytes` 控制，默认 32 MiB，允许调整到 64 MiB。Session 释放时附件也会
+一起清理。ACP 会优先使用 Agent 声明支持的 image/audio/embeddedContext 能力，否则为 Agent 提供受限的
+`file://` resource link；A2A 则以带文件名和媒体类型的二进制 Part 发送。
 
 API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
 旧 `authToken` 复制到该字段。
@@ -159,6 +169,7 @@ GET    /v1/admin/runs/:id
 PUT    /v1/admin/agents/:id
 DELETE /v1/admin/agents/:id
 PUT    /v1/admin/config/workspace-roots
+PUT    /v1/admin/config/runtime
 PUT    /v1/admin/password
 GET    /v1/admin/api-keys
 POST   /v1/admin/api-keys
@@ -174,6 +185,7 @@ Bearer API Key 数据面：
 GET  /v1/agents
 POST /v1/sessions
 GET  /v1/sessions/:id
+POST /v1/sessions/:id/attachments
 POST /v1/sessions/:id/message
 POST /v1/sessions/:id/cancel
 GET  /v1/sessions/:id/events

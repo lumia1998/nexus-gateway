@@ -61,6 +61,27 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
         assert.ok(fixture.control.authenticateApiKey('legacy-token-value'))
         assert.equal(JSON.stringify(fixture.control.snapshot()).includes('legacy-token-value'), false)
 
+        const runtime = await fixture.control.putRuntimeSettings({
+            sessionTtlMs: 48 * 60 * 60 * 1000,
+            promptTimeoutMs: 20 * 60 * 1000,
+            cleanupIntervalMs: 30_000
+        })
+        assert.equal(runtime.sessionTtlMs, 48 * 60 * 60 * 1000)
+        assert.equal(runtime.promptTimeoutMs, 20 * 60 * 1000)
+        assert.equal(runtime.cleanupIntervalMs, 30_000)
+        const runtimeRaw = JSON.parse(await readFile(fixture.configPath, 'utf8'))
+        assert.equal(runtimeRaw.sessionTtlMs, 48 * 60 * 60 * 1000)
+        assert.equal(runtimeRaw.promptTimeoutMs, 20 * 60 * 1000)
+        assert.equal(runtimeRaw.cleanupIntervalMs, 30_000)
+        await assert.rejects(
+            () => fixture.control.putRuntimeSettings({
+                sessionTtlMs: 60_000,
+                promptTimeoutMs: 20 * 60 * 1000,
+                cleanupIntervalMs: 1_000
+            }),
+            (error: unknown) => error instanceof ControlPlaneError && error.status === 400
+        )
+
         await fixture.control.putAgent('local', {
             protocol: 'acp',
             driver: 'codex',

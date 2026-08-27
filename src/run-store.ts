@@ -28,6 +28,7 @@ export interface CreateRunInput {
     protocolSessionId?: string
     ownerKeyId: string
     task: string
+    inputAttachmentCount?: number
 }
 
 export interface RunListQuery {
@@ -123,6 +124,7 @@ export class RunStore {
             ownerKeyId: input.ownerKeyId,
             task: taskTruncated ? input.task.slice(0, this.maxTaskChars) : input.task,
             taskTruncated: taskTruncated || undefined,
+            inputAttachmentCount: input.inputAttachmentCount || undefined,
             state: 'running',
             progress: { phase: '已接收', message: '任务已交给智能体' },
             artifacts: [],
@@ -150,6 +152,7 @@ export class RunStore {
                 | 'updatedAt'
                 | 'endedAt'
                 | 'durationMs'
+                | 'inputAttachmentCount'
             >
         >
     ) {

@@ -47,6 +47,12 @@ export interface AgentdApiKeyUpdate {
     scope?: AgentdApiKeyScope
 }
 
+export interface AgentdRuntimeSettingsUpdate {
+    sessionTtlMs: number
+    promptTimeoutMs: number
+    cleanupIntervalMs: number
+}
+
 export class AgentdControlPlane {
     private queue = Promise.resolve()
     private usageTimer?: NodeJS.Timeout
@@ -61,6 +67,9 @@ export class AgentdControlPlane {
         return {
             workspaceRoots: [...this.config.workspaceRoots],
             driverKinds: [...agentdDriverKinds],
+            sessionTtlMs: this.config.sessionTtlMs,
+            promptTimeoutMs: this.config.promptTimeoutMs || 30 * 60 * 1000,
+            cleanupIntervalMs: this.config.cleanupIntervalMs || 60_000,
             agents: Object.entries(this.config.agents)
                 .map(([id, config]) => this.agentView(id, config))
                 .sort((left, right) => left.name.localeCompare(right.name))
@@ -241,6 +250,18 @@ export class AgentdControlPlane {
             await WorkspacePolicy.create(workspaceRoots)
             const raw = await this.readRawConfig()
             raw.workspaceRoots = workspaceRoots
+            await this.persist(raw)
+            return this.snapshot()
+        })
+    }
+
+    putRuntimeSettings(update: AgentdRuntimeSettingsUpdate) {
+        return this.exclusive(async () => {
+            validateRuntimeSettings(update)
+            const raw = await this.readRawConfig()
+            raw.sessionTtlMs = update.sessionTtlMs
+            raw.promptTimeoutMs = update.promptTimeoutMs
+            raw.cleanupIntervalMs = update.cleanupIntervalMs
             await this.persist(raw)
             return this.snapshot()
         })
@@ -543,6 +564,18 @@ export class ControlPlaneError extends Error {
         message: string
     ) {
         super(message)
+    }
+}
+
+function validateRuntimeSettings(update: AgentdRuntimeSettingsUpdate) {
+    validateIntegerRange(update.sessionTtlMs, 60_000, 30 * 24 * 60 * 60 * 1000, 'sessionTtlMs')
+    validateIntegerRange(update.promptTimeoutMs, 10_000, 24 * 60 * 60 * 1000, 'promptTimeoutMs')
+    validateIntegerRange(update.cleanupIntervalMs, 5_000, 60 * 60 * 1000, 'cleanupIntervalMs')
+}
+
+function validateIntegerRange(value: number, min: number, max: number, name: string) {
+    if (!Number.isInteger(value) || value < min || value > max) {
+        throw new ControlPlaneError(400, `${name} must be between ${min} and ${max}`)
     }
 }
 

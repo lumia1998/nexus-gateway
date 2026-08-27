@@ -18,11 +18,17 @@ test('first run creates a pending config and preserves an explicit 0.0.0.0 liste
         const raw = JSON.parse(await readFile(configPath, 'utf8'))
         assert.equal(raw.initialized, false)
         assert.equal(raw.listen.host, '0.0.0.0')
+        assert.equal(raw.sessionTtlMs, 24 * 60 * 60 * 1000)
+        assert.equal(raw.promptTimeoutMs, 30 * 60 * 1000)
+        assert.equal(raw.cleanupIntervalMs, 60_000)
         assert.deepEqual(raw.apiKeys, [])
 
         const loaded = await loadAgentdConfig(configPath)
         assert.equal(loaded.listen.host, '0.0.0.0')
         assert.equal(loaded.initialized, false)
+        assert.equal(loaded.sessionTtlMs, 24 * 60 * 60 * 1000)
+        assert.equal(loaded.promptTimeoutMs, 30 * 60 * 1000)
+        assert.equal(loaded.cleanupIntervalMs, 60_000)
         assert.deepEqual(loaded.apiKeys, [])
         assert.deepEqual(await ensureAgentdConfig(configPath), { created: false })
     } finally {

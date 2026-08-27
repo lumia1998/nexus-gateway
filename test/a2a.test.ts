@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
-import { probeA2AAgent } from '../src/a2a/runtime.js'
+import { A2AClientRuntime, probeA2AAgent } from '../src/a2a/runtime.js'
 
 test('A2A readiness discovers a v1 Agent Card through authenticated fetch', async () => {
     let base = ''
@@ -83,4 +83,32 @@ test('A2A readiness discovers a v1 Agent Card through authenticated fetch', asyn
             server.close((error) => (error ? reject(error) : resolve()))
         )
     }
+})
+
+test('A2A requests carry input files as raw Parts with filename and media type', () => {
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: 'http://127.0.0.1:8787/.well-known/agent-card.json',
+            timeoutMs: 60_000
+        },
+        { id: 'session-1' } as any,
+        30 * 60 * 1000
+    )
+    const request = (runtime as any).messageRequest('请分析附件', [
+        {
+            id: 'input-1',
+            name: '需求.pdf',
+            mediaType: 'application/pdf',
+            bytes: Buffer.from([0, 255, 1])
+        }
+    ])
+    assert.equal(request.message.parts[0].content.$case, 'text')
+    assert.equal(request.message.parts[1].content.$case, 'raw')
+    assert.deepEqual(
+        [...request.message.parts[1].content.value],
+        [0, 255, 1]
+    )
+    assert.equal(request.message.parts[1].filename, '需求.pdf')
+    assert.equal(request.message.parts[1].mediaType, 'application/pdf')
 })

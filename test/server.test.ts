@@ -22,9 +22,11 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         const html = await response.text()
         assert.match(html, /Agent Nexus/)
         assert.match(html, /lang="zh-CN"/)
-        for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥']) {
+        for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥', '运行设置']) {
             assert.match(html, new RegExp(`>${label}<`))
         }
+        assert.match(html, /Session 空闲有效期（小时）/)
+        assert.match(html, /清理任务周期（秒）/)
         const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
         assert.ok(script)
         assert.doesNotThrow(() => new Function(script))
@@ -109,7 +111,35 @@ test('Console Cookie and client API Keys are separate, with upgrade-safe bootstr
             ).status,
             401
         )
-        assert.equal((await adminGet(fixture.base, '/v1/admin/config', cookie)).status, 200)
+        const initialConfig = await adminGet(fixture.base, '/v1/admin/config', cookie)
+        assert.equal(initialConfig.status, 200)
+        const initialRuntime = await initialConfig.json()
+        assert.equal(initialRuntime.sessionTtlMs, 24 * 60 * 60 * 1000)
+        assert.equal(initialRuntime.promptTimeoutMs, 30 * 60 * 1000)
+        assert.equal(initialRuntime.cleanupIntervalMs, 60_000)
+        const runtimeResponse = await adminJson(
+            fixture.base,
+            '/v1/admin/config/runtime',
+            cookie,
+            'PUT',
+            {
+                sessionTtlMs: 48 * 60 * 60 * 1000,
+                promptTimeoutMs: 20 * 60 * 1000,
+                cleanupIntervalMs: 30_000
+            }
+        )
+        assert.equal(runtimeResponse.status, 200)
+        assert.deepEqual(
+            ((await runtimeResponse.json()) as Record<string, unknown>),
+            {
+                workspaceRoots: [fixture.directory],
+                driverKinds: ['opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes'],
+                sessionTtlMs: 48 * 60 * 60 * 1000,
+                promptTimeoutMs: 20 * 60 * 1000,
+                cleanupIntervalMs: 30_000,
+                agents: []
+            }
+        )
         assert.equal(
             (
                 await fetch(`${fixture.base}/v1/agents`, {
@@ -296,6 +326,38 @@ test('API Key Agent scope and session ownership are enforced independently', asy
         })
         assert.equal(createdResponse.status, 201)
         const created = await createdResponse.json()
+        const attachmentResponse = await fetch(
+            `${base}/v1/sessions/${created.id}/attachments`,
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer key-a-secret-value',
+                    'Content-Type': 'text/plain',
+                    'X-Nexus-File-Name': encodeURIComponent('需求说明.txt')
+                },
+                body: new TextEncoder().encode('请保留原始文件内容')
+            }
+        )
+        assert.equal(attachmentResponse.status, 201)
+        assert.deepEqual(await attachmentResponse.json(), {
+            id: 'attachment-1',
+            name: '需求说明.txt',
+            mediaType: 'text/plain',
+            size: new TextEncoder().encode('请保留原始文件内容').length
+        })
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}/attachments`, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: 'Bearer key-b-secret-value',
+                        'Content-Type': 'text/plain'
+                    },
+                    body: 'no'
+                })
+            ).status,
+            404
+        )
         assert.equal(
             (
                 await fetch(`${base}/v1/sessions/${created.id}`, {
@@ -393,7 +455,8 @@ function configuredServerConfig(): AgentdConfig {
             }
         ],
         workspaceRoots: [],
-        maxRequestBytes: 1024 * 1024,
+    maxRequestBytes: 1024 * 1024,
+        maxAttachmentBytes: 32 * 1024 * 1024,
         maxEventsPerSession: 64,
         maxOutputChars: 64 * 1024,
         sessionTtlMs: 60_000,
@@ -450,6 +513,21 @@ class FakeSessions {
 
     count() {
         return this.sessions.size
+    }
+
+    addInputAttachment(
+        id: string,
+        name: string,
+        mediaType: string | undefined,
+        bytes: Buffer
+    ) {
+        if (!this.sessions.has(id)) throw new Error('not found')
+        return {
+            id: 'attachment-1',
+            name,
+            mediaType,
+            size: bytes.length
+        }
     }
 }
 

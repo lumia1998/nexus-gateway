@@ -15,6 +15,8 @@ import type {
     AgentdConfig,
     AgentdEvent,
     AgentdEventType,
+    AgentdInputAttachment,
+    AgentdInputAttachmentView,
     AgentdPendingRequest,
     AgentdProtocol,
     AgentdRunProgress,
@@ -27,6 +29,9 @@ const MAX_SESSION_ARTIFACTS = 64
 const MAX_ARTIFACT_BASE64_CHARS = 16 * 1024 * 1024
 const MAX_SESSION_BASE64_CHARS = 32 * 1024 * 1024
 const READINESS_CACHE_MS = 20_000
+const MAX_INPUT_ATTACHMENTS = 16
+const MAX_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
+const MAX_SESSION_INPUT_BYTES = 32 * 1024 * 1024
 
 export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     readonly id = randomUUID()
@@ -40,6 +45,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     error?: string
     pendingRequest?: AgentdPendingRequest
     private artifacts: AgentdArtifact[] = []
+    private inputAttachments = new Map<string, AgentdInputAttachment>()
     private runtime?: AgentSessionRuntime
 
     constructor(
@@ -172,13 +178,44 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         if (progress) this.syncRun({ progress })
     }
 
-    async message(message: string) {
+    addInputAttachment(
+        name: string,
+        mediaType: string | undefined,
+        bytes: Buffer
+    ): AgentdInputAttachmentView {
+        if (bytes.length > MAX_INPUT_ATTACHMENT_BYTES) {
+            throw new SessionRequestError(413, 'Input attachment is too large')
+        }
+        const retained = Array.from(this.inputAttachments.values()).reduce(
+            (total, attachment) => total + attachment.bytes.length,
+            0
+        )
+        if (this.inputAttachments.size >= MAX_INPUT_ATTACHMENTS) {
+            throw new SessionRequestError(413, 'Too many input attachments')
+        }
+        if (retained + bytes.length > MAX_SESSION_INPUT_BYTES) {
+            throw new SessionRequestError(413, 'Session input attachments are too large')
+        }
+        const id = randomUUID()
+        const attachment: AgentdInputAttachment = {
+            id,
+            name: safeAttachmentName(name) || `attachment-${id.slice(0, 8)}`,
+            mediaType: mediaType || undefined,
+            bytes: Buffer.from(bytes)
+        }
+        this.inputAttachments.set(id, attachment)
+        this.updatedAt = Date.now()
+        return attachmentView(attachment)
+    }
+
+    async message(message: string, attachmentIds: string[] = []) {
         if (!this.runtime) throw new SessionRequestError(409, 'Agent runtime is unavailable')
+        const attachments = this.inputAttachmentsFor(attachmentIds)
         if (this.pendingRequest) {
             this.syncRun({
                 progress: { phase: '继续执行', message: '已提交补充信息' }
             })
-            await this.runtime.respondPending(message)
+            await this.runtime.respondPending(message, attachments)
             return
         }
         if (this.state === 'running') {
@@ -196,9 +233,10 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             workspace: this.workspace,
             protocolSessionId: this.protocolSessionId,
             ownerKeyId: this.ownerKeyId,
-            task: message
+            task: message,
+            inputAttachmentCount: attachments.length
         }).id
-        void this.runtime.prompt(message).catch((error) => {
+        void this.runtime.prompt(message, attachments).catch((error) => {
             if (this.state !== 'canceled') this.setState('failed', errorMessage(error))
         })
     }
@@ -209,6 +247,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 
     async dispose() {
         await this.runtime?.dispose()
+        this.inputAttachments.clear()
     }
 
     snapshot(): AgentdSessionView {
@@ -224,6 +263,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             output: this.output || undefined,
             error: this.error,
             artifacts: structuredClone(this.artifacts),
+            inputAttachments: Array.from(this.inputAttachments.values()).map(attachmentView),
             pendingRequest: this.pendingRequest
                 ? structuredClone(this.pendingRequest)
                 : undefined,
@@ -252,6 +292,15 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             ...patch
         })
     }
+
+    private inputAttachmentsFor(ids: string[]) {
+        const unique = Array.from(new Set(ids))
+        const attachments = unique.map((id) => this.inputAttachments.get(id))
+        if (attachments.some((attachment) => !attachment)) {
+            throw new SessionRequestError(400, 'Unknown input attachment')
+        }
+        return attachments as AgentdInputAttachment[]
+    }
 }
 
 export class SessionManager {
@@ -275,12 +324,12 @@ export class SessionManager {
         this.workspacePolicy = workspacePolicy
         this.drivers = drivers
         this.readinessCache = undefined
+        if (this.cleanupTimer) this.restartCleanup()
     }
 
     startCleanup() {
         if (this.cleanupTimer) return
-        this.cleanupTimer = setInterval(() => void this.cleanup(), 60_000)
-        this.cleanupTimer.unref?.()
+        this.restartCleanup()
     }
 
     async listAgents(agentIds?: Set<string>, force = false): Promise<AgentdAgentView[]> {
@@ -436,12 +485,22 @@ export class SessionManager {
         return run
     }
 
-    async message(id: string, message: string) {
+    async message(id: string, message: string, attachmentIds: string[] = []) {
         const text = String(message || '')
         if (!text.trim()) throw new SessionRequestError(400, 'message is required')
         const session = this.require(id)
-        await session.message(text)
+        await session.message(text, attachmentIds)
         return session.snapshot()
+    }
+
+    addInputAttachment(
+        id: string,
+        name: string,
+        mediaType: string | undefined,
+        bytes: Buffer
+    ) {
+        const session = this.require(id)
+        return session.addInputAttachment(name, mediaType, bytes)
     }
 
     async cancel(id: string) {
@@ -502,6 +561,15 @@ export class SessionManager {
             await session.dispose()
             this.sessions.delete(id)
         }
+    }
+
+    private restartCleanup() {
+        if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+        this.cleanupTimer = setInterval(
+            () => void this.cleanup(),
+            this.config.cleanupIntervalMs || 60_000
+        )
+        this.cleanupTimer.unref?.()
     }
 
     private defaultWorkspace(agentId: string) {
@@ -629,4 +697,20 @@ function isActive(state: AgentdSessionState) {
 
 function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error)
+}
+
+function attachmentView(attachment: AgentdInputAttachment): AgentdInputAttachmentView {
+    return {
+        id: attachment.id,
+        name: attachment.name,
+        mediaType: attachment.mediaType,
+        size: attachment.bytes.length
+    }
+}
+
+function safeAttachmentName(value: string) {
+    return String(value || '')
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+        .trim()
+        .slice(0, 180)
 }
