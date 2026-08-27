@@ -33,16 +33,19 @@ export class AcpProcessRuntime {
     private disposed = false
     private prompting = false
     private readonly maxStderrChunkChars: number
+    private readonly promptTimeoutMs: number
 
     constructor(
         private readonly driver: AgentDriver,
         private readonly sink: AcpSessionSink,
-        maxStderrChunkChars = 16 * 1024
+        maxStderrChunkChars = 16 * 1024,
+        promptTimeoutMs = 30 * 60 * 1000
     ) {
         const limit = Number.isFinite(maxStderrChunkChars)
             ? Math.floor(maxStderrChunkChars)
             : 16 * 1024
         this.maxStderrChunkChars = Math.max(1, Math.min(16 * 1024, limit))
+        this.promptTimeoutMs = Math.max(10_000, Math.trunc(promptTimeoutMs))
     }
 
     async start(workspace: string) {
@@ -118,12 +121,13 @@ export class AcpProcessRuntime {
         this.sink.clearPending()
         this.sink.setState('running')
         try {
-            const response = await this.connection.agent.request(
-                acp.methods.agent.session.prompt,
-                {
+            const response = await withTimeout(
+                this.connection.agent.request(acp.methods.agent.session.prompt, {
                     sessionId,
                     prompt: [{ type: 'text', text: message }]
-                }
+                }),
+                this.promptTimeoutMs,
+                'ACP prompt timed out'
             )
             if (this.sink.state === 'canceled' || this.sink.state === 'failed') {
                 return
@@ -142,6 +146,7 @@ export class AcpProcessRuntime {
                     error instanceof Error ? error.message : String(error)
                 )
             }
+            if (error instanceof PromptTimeoutError) await this.dispose()
         } finally {
             this.prompting = false
         }
@@ -475,6 +480,19 @@ export class AcpProcessRuntime {
         }
         return value
     }
+}
+
+class PromptTimeoutError extends Error {}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new PromptTimeoutError(message)), timeoutMs)
+        timer.unref?.()
+    })
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer)
+    })
 }
 
 function artifactFromContent(

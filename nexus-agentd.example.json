@@ -1,50 +1,38 @@
 {
-  "initialized": true,
+  "initialized": false,
   "listen": {
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8787
   },
-  "authToken": "env:NEXUS_AGENTD_TOKEN",
   "workspaceRoots": [
     "/data/repos"
   ],
+  "apiKeys": [],
+  "maxRequestBytes": 1048576,
+  "requestTimeoutMs": 30000,
+  "promptTimeoutMs": 1800000,
+  "maxSessions": 64,
+  "maxSseConnections": 128,
+  "maxConnections": 256,
+  "sessionTtlMs": 86400000,
   "agents": {
-    "opencode": {
-      "driver": "opencode",
-      "command": "opencode",
-      "args": ["acp"],
-      "permissionPolicy": "ask",
-      "inheritEnv": [
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY"
-      ]
-    },
-    "claude": {
-      "driver": "claude",
-      "command": "claude-agent-acp",
-      "permissionPolicy": "ask"
-    },
     "codex": {
+      "protocol": "acp",
       "driver": "codex",
+      "name": "Codex",
       "command": "codex-acp",
+      "workspace": "/data/repos/project",
       "permissionPolicy": "ask"
     },
-    "pi": {
-      "driver": "pi",
-      "command": "pi-acp",
-      "permissionPolicy": "ask"
-    },
-    "openclaw": {
-      "driver": "openclaw",
-      "command": "openclaw",
-      "args": ["acp"],
-      "permissionPolicy": "ask"
-    },
-    "hermes": {
-      "driver": "hermes",
-      "command": "hermes",
-      "args": ["acp"],
-      "permissionPolicy": "ask"
+    "research": {
+      "protocol": "a2a",
+      "name": "Research Agent",
+      "agentCardUrl": "http://192.168.1.20:8080/.well-known/agent-card.json",
+      "preferredTransport": "auto",
+      "auth": {
+        "type": "none"
+      },
+      "timeoutMs": 60000
     }
   }
 }

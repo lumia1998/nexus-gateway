@@ -22,7 +22,20 @@ export class SessionEventLog {
         if (this.events.length > this.maxEvents) {
             this.events.splice(0, this.events.length - this.maxEvents)
         }
-        for (const listener of this.listeners) listener(structuredClone(event))
+        for (const listener of this.listeners) {
+            try {
+                listener(structuredClone(event))
+            } catch (error) {
+                console.error(
+                    JSON.stringify({
+                        level: 'error',
+                        event: 'session_event_listener_failed',
+                        sessionId: this.sessionId,
+                        message: error instanceof Error ? error.message : String(error)
+                    })
+                )
+            }
+        }
         return event
     }
 

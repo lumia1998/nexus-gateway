@@ -1,350 +1,495 @@
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
-import { ControlPlaneError } from '../src/control-plane.js'
+import { loadAgentdConfig } from '../src/config.js'
+import { AgentdControlPlane } from '../src/control-plane.js'
+import { createDriverRegistry } from '../src/drivers/index.js'
 import { createAgentdServer } from '../src/server.js'
-import type { AgentdConfig } from '../src/types.js'
+import { RunStore, runStorePathForConfig } from '../src/run-store.js'
+import { SessionManager } from '../src/session.js'
+import type { AgentdConfig, AgentdSessionView } from '../src/types.js'
+import { WorkspacePolicy } from '../src/workspace.js'
 
-test('gateway requires bearer auth and rejects client supplied command/argv', async () => {
-    let createCalls = 0
-    const sessions = {
-        async listAgents() {
-            return []
-        },
-        async create() {
-            createCalls += 1
-            return {}
-        }
-    } as any
-    const server = createAgentdServer(config(), sessions)
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
+test('Agent Nexus WebUI is embedded, framework-free, and free of the retired control-deck shell', async () => {
+    const fixture = await startFreshServer('127.0.0.1')
     try {
-        const unauthorized = await fetch(`http://127.0.0.1:${port}/v1/agents`)
-        assert.equal(unauthorized.status, 401)
-
-        const agents = await fetch(`http://127.0.0.1:${port}/v1/agents`, {
-            headers: { Authorization: 'Bearer test-token' }
-        })
-        assert.equal(agents.status, 200)
-
-        const injection = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
-            method: 'POST',
-            headers: {
-                Authorization: 'Bearer test-token',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                agentId: 'opencode',
-                workspace: '/tmp/project',
-                command: 'sh',
-                argv: ['-c', 'PAYLOAD']
-            })
-        })
-        assert.equal(injection.status, 400)
-        assert.match(await injection.text(), /Unsupported request fields/)
-        assert.equal(createCalls, 0)
+        const response = await fetch(`${fixture.base}/ui/`)
+        assert.equal(response.status, 200)
+        assert.match(response.headers.get('content-security-policy') || '', /default-src 'none'/)
+        const html = await response.text()
+        assert.match(html, /Agent Nexus/)
+        assert.match(html, /lang="zh-CN"/)
+        for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥']) {
+            assert.match(html, new RegExp(`>${label}<`))
+        }
+        const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
+        assert.ok(script)
+        assert.doesNotThrow(() => new Function(script))
+        assert.match(html, /检查中/)
+        assert.doesNotMatch(html, /尚未检查/)
+        assert.match(html, /Agent Card URL/)
+        assert.match(html, /首选传输/)
+        assert.match(html, /Bearer Token/)
+        assert.doesNotMatch(html, /gradient|backdrop-filter|sessionStorage|nexus-agentd-token/i)
+        assert.doesNotMatch(html, /react|vue|unpkg|jsdelivr/i)
+        assert.equal((await fetch(`${fixture.base}/`)).url, `${fixture.base}/ui/`)
     } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve()))
-        )
+        await fixture.close()
     }
 })
 
-test('gateway serves its control deck and protects agent configuration writes', async () => {
-    const calls: Array<{ id: string; input: unknown }> = []
-    let accessKey = 'test-token'
-    let workspaceRoots = ['/repos']
-    const sessions = {
-        async listAgents() {
-            return []
-        },
-        async create(agentId: string, workspace?: string) {
-            return { agentId, workspace }
-        }
-    } as any
-    const controlPlane = {
-        isInitialized() {
-            return true
-        },
-        accessKey() {
-            return accessKey
-        },
-        snapshot() {
-            return { workspaceRoots, driverKinds: ['codex'], agents: [] }
-        },
-        async putAgent(id: string, input: unknown) {
-            calls.push({ id, input })
-            return this.snapshot()
-        },
-        async deleteAgent() {
-            return this.snapshot()
-        },
-        async putWorkspaceRoots(values: string[]) {
-            workspaceRoots = values
-            return this.snapshot()
-        },
-        async rotateAccessKey() {
-            accessKey = 'rotated-test-token'
-            return { accessKey }
-        }
-    } as any
-    const server = createAgentdServer(config(), sessions, controlPlane)
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
-    const base = `http://127.0.0.1:${port}`
+test('Console Cookie and client API Keys are separate, with upgrade-safe bootstrap and password revocation', async () => {
+    const fixture = await startFreshServer('0.0.0.0')
     try {
-        const redirect = await fetch(base, { redirect: 'manual' })
-        assert.equal(redirect.status, 302)
-        assert.equal(redirect.headers.get('location'), '/ui/')
-
-        const ui = await fetch(`${base}/ui/`)
-        assert.equal(ui.status, 200)
-        const uiBody = await ui.text()
-        assert.match(uiBody, /NEXUS\/\/CONTROL/)
-        assert.match(uiBody, /id="bootstrap-dialog"/)
-        assert.match(uiBody, /id="bootstrap-access-key"/)
-        assert.match(uiBody, /id="bootstrap-confirm"/)
-        assert.match(ui.headers.get('content-security-policy') || '', /nonce-/)
-        assert.equal(ui.headers.get('x-frame-options'), 'DENY')
-
-        const unauthorized = await fetch(`${base}/v1/config`)
-        assert.equal(unauthorized.status, 401)
-
-        const configuration = await fetch(`${base}/v1/config`, {
-            headers: { Authorization: 'Bearer test-token' }
-        })
-        assert.equal(configuration.status, 200)
-
-        const injection = await fetch(`${base}/v1/config/agents/codex`, {
-            method: 'PUT',
-            headers: {
-                Authorization: 'Bearer test-token',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ driver: 'codex', command: 'sh' })
-        })
-        assert.equal(injection.status, 400)
-        assert.equal(calls.length, 0)
-
-        const saved = await fetch(`${base}/v1/config/agents/codex`, {
-            method: 'PUT',
-            headers: {
-                Authorization: 'Bearer test-token',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                driver: 'codex',
-                enabled: true,
-                workspace: '/repos'
-            })
-        })
-        assert.equal(saved.status, 200)
-        assert.equal(calls.length, 1)
-        assert.equal(calls[0].id, 'codex')
-
-        const session = await fetch(`${base}/v1/sessions`, {
-            method: 'POST',
-            headers: {
-                Authorization: 'Bearer test-token',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ agentId: 'codex' })
-        })
-        assert.equal(session.status, 201)
-        assert.deepEqual(await session.json(), { agentId: 'codex' })
-
-        const roots = await fetch(`${base}/v1/config/workspace-roots`, {
-            method: 'PUT',
-            headers: {
-                Authorization: 'Bearer test-token',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ workspaceRoots: ['/repos', '/work'] })
-        })
-        assert.equal(roots.status, 200)
-        assert.deepEqual(workspaceRoots, ['/repos', '/work'])
-
-        const rotated = await fetch(`${base}/v1/config/access-key/rotate`, {
-            method: 'POST',
-            headers: { Authorization: 'Bearer test-token' }
-        })
-        assert.equal(rotated.status, 200)
-        assert.deepEqual(await rotated.json(), {
-            accessKey: 'rotated-test-token'
-        })
-        assert.equal(
-            (
-                await fetch(`${base}/v1/config`, {
-                    headers: { Authorization: 'Bearer test-token' }
-                })
-            ).status,
-            401
-        )
-        assert.equal(
-            (
-                await fetch(`${base}/v1/config`, {
-                    headers: { Authorization: 'Bearer rotated-test-token' }
-                })
-            ).status,
-            200
-        )
-    } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve()))
-        )
-    }
-})
-
-test('first-run setup is single-use and protects the Gateway before initialization', async () => {
-    let initialized = false
-    let accessKey: string | undefined
-    let queue = Promise.resolve()
-    const sessions = {
-        async listAgents() {
-            return []
-        }
-    } as any
-    const controlPlane = {
-        isInitialized() {
-            return initialized
-        },
-        accessKey() {
-            return accessKey
-        },
-        initializeAccessKey(value: string, confirmation: string) {
-            const result = queue.then(async () => {
-                if (initialized) {
-                    throw new ControlPlaneError(
-                        409,
-                        'Gateway setup is already complete'
-                    )
-                }
-                if (value.length < 8) {
-                    throw new ControlPlaneError(
-                        400,
-                        'Access Key must contain at least 8 characters'
-                    )
-                }
-                if (value !== confirmation) {
-                    throw new ControlPlaneError(
-                        400,
-                        'Access Key confirmation does not match'
-                    )
-                }
-                await new Promise<void>((resolve) => setImmediate(resolve))
-                initialized = true
-                accessKey = value
-                return { initialized: true as const }
-            })
-            queue = result.then(
-                () => undefined,
-                () => undefined
-            )
-            return result
-        }
-    } as any
-    const pending = config()
-    pending.initialized = false
-    pending.authToken = undefined
-    const server = createAgentdServer(pending, sessions, controlPlane)
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
-    const base = `http://127.0.0.1:${port}`
-    const setup = (key: string, confirmation = key, headers = {}) =>
-        fetch(`${base}/v1/bootstrap/initialize`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Origin: base,
-                ...headers
-            },
-            body: JSON.stringify({ accessKey: key, confirmAccessKey: confirmation })
-        })
-    try {
-        assert.deepEqual(await (await fetch(`${base}/health`)).json(), {
+        assert.equal((fixture.server.address() as AddressInfo).address, '0.0.0.0')
+        assert.deepEqual(await json(`${fixture.base}/health`), {
             ok: true,
-            initialized: false
+            initialized: false,
+            adminSetupRequired: true
         })
-        assert.deepEqual(
-            await (await fetch(`${base}/v1/bootstrap/status`)).json(),
-            { initialized: false }
-        )
-        assert.equal((await fetch(`${base}/v1/agents`)).status, 428)
+        assert.equal((await fetch(`${fixture.base}/v1/agents`)).status, 428)
 
-        const wrongContentType = await fetch(
-            `${base}/v1/bootstrap/initialize`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain' },
-                body: JSON.stringify({
-                    accessKey: 'valid-key',
-                    confirmAccessKey: 'valid-key'
-                })
-            }
-        )
-        assert.equal(wrongContentType.status, 415)
         assert.equal(
             (
-                await setup('valid-key', 'valid-key', {
-                    Origin: 'http://evil.example'
+                await fetch(`${fixture.base}/v1/bootstrap/initialize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        password: 'initial-password',
+                        confirmPassword: 'initial-password'
+                    })
                 })
             ).status,
             403
         )
-        assert.equal((await setup('short')).status, 400)
-        assert.equal((await setup('valid-key', 'different-key')).status, 400)
-
-        const attempts = await Promise.all([
-            setup('first-key'),
-            setup('second-key')
-        ])
-        assert.deepEqual(
-            attempts.map((response) => response.status).sort(),
-            [201, 409]
-        )
-        const successful = attempts.find((response) => response.status === 201)
-        assert.ok(successful)
-        assert.deepEqual(await successful.json(), { initialized: true })
-        assert.equal(
-            JSON.stringify(await (await fetch(`${base}/v1/bootstrap/status`)).json())
-                .includes('key'),
-            false
-        )
-        assert.equal((await setup('third-key')).status, 409)
         assert.equal(
             (
-                await fetch(`${base}/v1/agents`, {
-                    headers: { Authorization: 'Bearer wrong-key' }
+                await fetch(`${fixture.base}/v1/bootstrap/initialize`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Origin: 'http://evil.example'
+                    },
+                    body: JSON.stringify({
+                        password: 'initial-password',
+                        confirmPassword: 'initial-password'
+                    })
+                })
+            ).status,
+            403
+        )
+        const initialized = await fetch(`${fixture.base}/v1/bootstrap/initialize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Origin: fixture.base },
+            body: JSON.stringify({
+                password: 'initial-password',
+                confirmPassword: 'initial-password'
+            })
+        })
+        assert.equal(initialized.status, 201)
+        assert.equal((await fixture.control.listApiKeys()).length, 0)
+
+        assert.equal((await login(fixture.base, 'wrong-password')).status, 401)
+        const signedIn = await login(fixture.base, 'initial-password')
+        assert.equal(signedIn.status, 200)
+        const cookie = signedIn.headers.get('set-cookie') || ''
+        assert.match(cookie, /^agent_nexus_admin=/)
+        assert.match(cookie, /HttpOnly/i)
+        assert.match(cookie, /SameSite=Strict/i)
+        assert.doesNotMatch(cookie, /Secure/i)
+
+        assert.equal(
+            (
+                await fetch(`${fixture.base}/v1/admin/config`, {
+                    headers: { Authorization: 'Bearer initial-password' }
                 })
             ).status,
             401
         )
+        assert.equal((await adminGet(fixture.base, '/v1/admin/config', cookie)).status, 200)
         assert.equal(
             (
-                await fetch(`${base}/v1/agents`, {
-                    headers: { Authorization: `Bearer ${accessKey}` }
+                await fetch(`${fixture.base}/v1/agents`, {
+                    headers: { Cookie: cookie }
+                })
+            ).status,
+            401
+        )
+
+        const keyResponse = await adminJson(
+            fixture.base,
+            '/v1/admin/api-keys',
+            cookie,
+            'POST',
+            {
+                name: 'LAN client',
+                scope: { allAgents: true, agentIds: [] }
+            }
+        )
+        assert.equal(keyResponse.status, 201)
+        const created = await keyResponse.json()
+        assert.match(created.secret, /^nx_sk_/)
+        const listed = await (await adminGet(fixture.base, '/v1/admin/api-keys', cookie)).json()
+        assert.equal(JSON.stringify(listed).includes(created.secret), false)
+        assert.equal(
+            (
+                await fetch(`${fixture.base}/v1/agents`, {
+                    headers: { Authorization: `Bearer ${created.secret}` }
                 })
             ).status,
             200
         )
-    } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve()))
+
+        const reveal = await adminJson(
+            fixture.base,
+            `/v1/admin/api-keys/${created.key.id}/reveal`,
+            cookie,
+            'POST'
         )
+        assert.equal((await reveal.json()).secret, created.secret)
+
+        const changed = await adminJson(
+            fixture.base,
+            '/v1/admin/password',
+            cookie,
+            'PUT',
+            {
+                currentPassword: 'initial-password',
+                newPassword: 'replacement-password',
+                confirmPassword: 'replacement-password'
+            }
+        )
+        assert.equal(changed.status, 200)
+        assert.match(changed.headers.get('set-cookie') || '', /Max-Age=0/)
+        assert.equal((await adminGet(fixture.base, '/v1/admin/config', cookie)).status, 401)
+        assert.equal((await login(fixture.base, 'initial-password')).status, 401)
+        assert.equal((await login(fixture.base, 'replacement-password')).status, 200)
+    } finally {
+        await fixture.close()
     }
 })
 
-function config(): AgentdConfig {
+test('run history is admin-only, filterable, and exposes bounded details', async () => {
+    const fixture = await startFreshServer('127.0.0.1')
+    try {
+        const initialized = await fetch(`${fixture.base}/v1/bootstrap/initialize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Origin: fixture.base },
+            body: JSON.stringify({
+                password: 'runs-password',
+                confirmPassword: 'runs-password'
+            })
+        })
+        assert.equal(initialized.status, 201)
+        const signedIn = await login(fixture.base, 'runs-password')
+        const cookie = signedIn.headers.get('set-cookie') || ''
+
+        const hermes = fixture.runStore.create({
+            sessionId: 'session-hermes',
+            agentId: 'hermes',
+            agentName: 'Hermes Agent',
+            protocol: 'acp',
+            ownerKeyId: 'private-key-id',
+            task: '  原样保留的任务  '
+        })
+        fixture.runStore.update(hermes.id, {
+            state: 'completed',
+            progress: { phase: '已完成' },
+            output: '任务结果',
+            endedAt: Date.now()
+        })
+        fixture.runStore.create({
+            sessionId: 'session-claude',
+            agentId: 'claude',
+            agentName: 'Claude Code',
+            protocol: 'acp',
+            ownerKeyId: 'another-key-id',
+            task: '修复项目'
+        })
+
+        assert.equal((await fetch(`${fixture.base}/v1/admin/runs`)).status, 401)
+        assert.equal(
+            (
+                await fetch(`${fixture.base}/v1/admin/runs`, {
+                    headers: { Authorization: 'Bearer private-key-id' }
+                })
+            ).status,
+            401
+        )
+
+        const listed = await adminGet(
+            fixture.base,
+            '/v1/admin/runs?agentId=hermes&state=completed&limit=10',
+            cookie
+        )
+        assert.equal(listed.status, 200)
+        const body = await listed.json()
+        assert.equal(body.total, 1)
+        assert.equal(body.runs[0].id, hermes.id)
+        assert.equal(body.runs[0].task, '  原样保留的任务  ')
+        assert.equal(body.runs[0].resultSummary, '任务结果')
+        assert.equal('output' in body.runs[0], false)
+        assert.equal(JSON.stringify(body).includes('private-key-id'), false)
+
+        const detailResponse = await adminGet(
+            fixture.base,
+            `/v1/admin/runs/${hermes.id}`,
+            cookie
+        )
+        assert.equal(detailResponse.status, 200)
+        const detail = await detailResponse.json()
+        assert.equal(detail.output, '任务结果')
+        assert.equal(detail.progress.phase, '已完成')
+        assert.equal(JSON.stringify(detail).includes('private-key-id'), false)
+        assert.equal(
+            (
+                await adminGet(
+                    fixture.base,
+                    '/v1/admin/runs/does-not-exist',
+                    cookie
+                )
+            ).status,
+            404
+        )
+    } finally {
+        await fixture.close()
+    }
+})
+
+test('API Key Agent scope and session ownership are enforced independently', async () => {
+    const sessions = new FakeSessions()
+    const config = configuredServerConfig()
+    const server = createAgentdServer(config, sessions as any)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+        const inventory = await fetch(`${base}/v1/agents`, {
+            headers: { Authorization: 'Bearer key-a-secret-value' }
+        })
+        assert.deepEqual(
+            (await inventory.json()).agents.map((agent: { id: string }) => agent.id),
+            ['agent-a']
+        )
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions`, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: 'Bearer key-a-secret-value',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ agentId: 'agent-b' })
+                })
+            ).status,
+            403
+        )
+        const createdResponse = await fetch(`${base}/v1/sessions`, {
+            method: 'POST',
+            headers: {
+                Authorization: 'Bearer key-a-secret-value',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ agentId: 'agent-a' })
+        })
+        assert.equal(createdResponse.status, 201)
+        const created = await createdResponse.json()
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}`, {
+                    headers: { Authorization: 'Bearer key-b-secret-value' }
+                })
+            ).status,
+            404
+        )
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}`, {
+                    headers: { Authorization: 'Bearer key-a-secret-value' }
+                })
+            ).status,
+            200
+        )
+
+        sessions.failInventory = true
+        const hidden = await fetch(`${base}/v1/agents`, {
+            headers: { Authorization: 'Bearer key-a-secret-value' }
+        })
+        assert.equal(hidden.status, 500)
+        const failure = await hidden.json()
+        assert.equal(failure.error, 'Internal server error')
+        assert.equal(typeof failure.requestId, 'string')
+    } finally {
+        await closeServer(server)
+    }
+})
+
+async function startFreshServer(host: string) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-server-'))
+    const configPath = path.join(directory, 'nexus-agentd.json')
+    await writeFile(
+        configPath,
+        JSON.stringify({
+            initialized: false,
+            listen: { host, port: 8787 },
+            workspaceRoots: [directory],
+            apiKeys: [],
+            agents: {}
+        })
+    )
+    const config = await loadAgentdConfig(configPath)
+    const runStore = new RunStore(runStorePathForConfig(configPath), 20)
+    await runStore.init()
+    const sessions = new SessionManager(
+        config,
+        await WorkspacePolicy.create(config.workspaceRoots),
+        createDriverRegistry(config),
+        runStore
+    )
+    const control = new AgentdControlPlane(configPath, config, sessions)
+    const server = createAgentdServer(config, sessions, control)
+    await new Promise<void>((resolve) => server.listen(0, host, resolve))
+    const port = (server.address() as AddressInfo).port
+    return {
+        directory,
+        configPath,
+        sessions,
+        runStore,
+        control,
+        server,
+        base: `http://127.0.0.1:${port}`,
+        async close() {
+            await closeServer(server)
+            await sessions.shutdown()
+            await runStore.flush()
+            await rm(directory, { recursive: true, force: true })
+        }
+    }
+}
+
+function configuredServerConfig(): AgentdConfig {
     return {
         listen: { host: '127.0.0.1', port: 0 },
         initialized: true,
-        authToken: 'test-token',
+        adminPasswordHash: 'not-used-by-this-test',
+        apiKeys: [
+            {
+                id: 'key-a',
+                name: 'A',
+                secret: 'key-a-secret-value',
+                enabled: true,
+                scope: { allAgents: false, agentIds: ['agent-a'] },
+                createdAt: 1
+            },
+            {
+                id: 'key-b',
+                name: 'B',
+                secret: 'key-b-secret-value',
+                enabled: true,
+                scope: { allAgents: true, agentIds: [] },
+                createdAt: 2
+            }
+        ],
         workspaceRoots: [],
         maxRequestBytes: 1024 * 1024,
         maxEventsPerSession: 64,
         maxOutputChars: 64 * 1024,
         sessionTtlMs: 60_000,
-        agents: {}
+        agents: {
+            'agent-a': { protocol: 'acp', driver: 'codex' },
+            'agent-b': { protocol: 'acp', driver: 'codex' }
+        }
     }
+}
+
+class FakeSessions {
+    failInventory = false
+    private readonly sessions = new Map<string, AgentdSessionView & { ownerKeyId: string }>()
+
+    async listAgents(ids?: Set<string>) {
+        if (this.failInventory) throw new Error('sensitive inventory failure')
+        return ['agent-a', 'agent-b']
+            .filter((id) => !ids || ids.has(id))
+            .map((id) => ({
+                id,
+                name: id,
+                protocol: 'acp' as const,
+                ready: true,
+                enabled: true
+            }))
+    }
+
+    async create(agentId: string, _workspace: string | undefined, ownerKeyId: string) {
+        const now = Date.now()
+        const session = {
+            id: `session-${this.sessions.size + 1}`,
+            protocol: 'acp' as const,
+            agentId,
+            state: 'created' as const,
+            artifacts: [],
+            createdAt: now,
+            updatedAt: now,
+            ownerKeyId
+        }
+        this.sessions.set(session.id, session)
+        return session
+    }
+
+    get(id: string) {
+        const session = this.sessions.get(id)
+        if (!session) throw new Error('not found')
+        const { ownerKeyId: _owner, ...view } = session
+        return view
+    }
+
+    owns(id: string, keyId: string) {
+        return this.sessions.get(id)?.ownerKeyId === keyId
+    }
+
+    count() {
+        return this.sessions.size
+    }
+}
+
+function login(base: string, password: string) {
+    return fetch(`${base}/v1/admin/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: base },
+        body: JSON.stringify({ password })
+    })
+}
+
+function adminGet(base: string, pathname: string, cookie: string) {
+    return fetch(`${base}${pathname}`, { headers: { Cookie: cookie } })
+}
+
+function adminJson(
+    base: string,
+    pathname: string,
+    cookie: string,
+    method: string,
+    body?: unknown
+) {
+    return fetch(`${base}${pathname}`, {
+        method,
+        headers: {
+            Cookie: cookie,
+            Origin: base,
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    })
+}
+
+async function json(url: string) {
+    return (await fetch(url)).json()
+}
+
+function closeServer(server: ReturnType<typeof createAgentdServer>) {
+    return new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()))
+        server.closeIdleConnections?.()
+    })
 }

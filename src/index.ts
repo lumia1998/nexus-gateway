@@ -1,31 +1,43 @@
 import type { Server } from 'node:http'
+import path from 'node:path'
 import { loadAgentdConfig } from './config.js'
 import { AgentdControlPlane } from './control-plane.js'
 import { createDriverRegistry } from './drivers/index.js'
 import { createAgentdServer } from './server.js'
+import { RunStore, runStorePathForConfig } from './run-store.js'
 import { SessionManager } from './session.js'
 import { WorkspacePolicy } from './workspace.js'
 
 export async function startAgentd(configPath: string) {
-    const config = await loadAgentdConfig(configPath)
+    const absoluteConfigPath = path.resolve(configPath)
+    const config = await loadAgentdConfig(absoluteConfigPath)
+    const runStore = new RunStore(
+        runStorePathForConfig(absoluteConfigPath),
+        1000,
+        config.maxRequestBytes
+    )
+    await runStore.init()
     const workspacePolicy = await WorkspacePolicy.create(config.workspaceRoots)
     const sessions = new SessionManager(
         config,
         workspacePolicy,
-        createDriverRegistry(config)
+        createDriverRegistry(config),
+        runStore
     )
     sessions.startCleanup()
-    const controlPlane = new AgentdControlPlane(configPath, config, sessions)
+    const controlPlane = new AgentdControlPlane(absoluteConfigPath, config, sessions)
     const server = createAgentdServer(config, sessions, controlPlane)
     await listen(server, config.listen.port, config.listen.host)
     return {
         config,
         server,
         sessions,
+        runStore,
         controlPlane,
         async close() {
             await closeServer(server)
             await sessions.shutdown()
+            await runStore.flush()
         }
     }
 }
@@ -56,6 +68,7 @@ function closeServer(server: Server) {
 export * from './config.js'
 export * from './control-plane.js'
 export * from './server.js'
+export * from './run-store.js'
 export * from './session.js'
 export * from './types.js'
 export * from './workspace.js'

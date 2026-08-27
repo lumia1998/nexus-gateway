@@ -9,172 +9,174 @@ import { createDriverRegistry } from '../src/drivers/index.js'
 import { SessionManager } from '../src/session.js'
 import { WorkspacePolicy } from '../src/workspace.js'
 
-test('control plane persists safe agent settings and reloads the live registry', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-control-'))
-    const workspaceRoot = path.join(directory, 'repos')
-    const project = path.join(workspaceRoot, 'project')
-    const outside = path.join(directory, 'outside')
-    const configPath = path.join(directory, 'nexus-agentd.json')
-    const secretName = 'NEXUS_AGENTD_CONTROL_PLANE_TEST_TOKEN'
-    const previousSecret = process.env[secretName]
-    process.env[secretName] = 'test-token'
-    await mkdir(project, { recursive: true })
-    await mkdir(outside)
-    await writeFile(
-        configPath,
-        JSON.stringify({
-            authToken: `env:${secretName}`,
-            workspaceRoots: [workspaceRoot],
-            agents: {
-                codex: {
-                    driver: 'codex',
-                    enabled: false,
-                    command: process.execPath,
-                    args: [],
-                    env: { PRESERVE_ME: 'yes' }
-                }
-            }
-        })
-    )
-
+test('Console Password setup is hashed, atomic, separate from API Keys, and one-time', async () => {
+    const fixture = await createFixture({ initialized: false, apiKeys: [], agents: {} })
     try {
-        const config = await loadAgentdConfig(configPath)
-        const sessions = new SessionManager(
-            config,
-            await WorkspacePolicy.create(config.workspaceRoots),
-            createDriverRegistry(config)
+        assert.equal(fixture.control.needsAdminSetup(), true)
+        await assert.rejects(
+            () => fixture.control.initializeAdminPassword('too-short', 'too-short'),
+            /at least 12 characters/
         )
-        const control = new AgentdControlPlane(configPath, config, sessions)
-
-        const preserved = await control.putAgent('codex', {
-            driver: 'codex',
-            workspace: project
-        })
-        assert.equal(preserved.agents[0].enabled, false)
-        assert.equal(
-            JSON.parse(await readFile(configPath, 'utf8')).agents.codex.enabled,
-            false
+        await assert.rejects(
+            () => fixture.control.initializeAdminPassword('first-password', 'other-password'),
+            /confirmation does not match/
         )
 
-        const updated = await control.putAgent('codex', {
+        const attempts = await Promise.allSettled([
+            fixture.control.initializeAdminPassword('first-password', 'first-password'),
+            fixture.control.initializeAdminPassword('second-password', 'second-password')
+        ])
+        assert.equal(attempts.filter((attempt) => attempt.status === 'fulfilled').length, 1)
+        const rejected = attempts.find(
+            (attempt): attempt is PromiseRejectedResult => attempt.status === 'rejected'
+        )
+        assert.ok(rejected?.reason instanceof ControlPlaneError)
+        assert.equal(rejected.reason.status, 409)
+
+        const raw = JSON.parse(await readFile(fixture.configPath, 'utf8'))
+        assert.match(raw.adminPasswordHash, /^scrypt\$/)
+        assert.equal(JSON.stringify(raw).includes('first-password'), false)
+        assert.equal(JSON.stringify(raw).includes('second-password'), false)
+        assert.deepEqual(raw.apiKeys, [])
+        assert.equal(await fixture.control.verifyAdminPassword('first-password'), true)
+        assert.equal(await fixture.control.verifyAdminPassword('second-password'), false)
+    } finally {
+        await fixture.close()
+    }
+})
+
+test('control plane manages ACP/A2A agents and recoverable scoped API Keys without leaking secrets', async () => {
+    const fixture = await createFixture({
+        initialized: true,
+        authToken: 'legacy-token-value',
+        workspaceRoots: [],
+        agents: {}
+    })
+    const project = path.join(fixture.directory, 'project')
+    await mkdir(project)
+    try {
+        const legacy = fixture.control.listApiKeys()
+        assert.equal(legacy.length, 1)
+        assert.equal(legacy[0].legacy, true)
+        assert.ok(fixture.control.authenticateApiKey('legacy-token-value'))
+        assert.equal(JSON.stringify(fixture.control.snapshot()).includes('legacy-token-value'), false)
+
+        await fixture.control.putAgent('local', {
+            protocol: 'acp',
             driver: 'codex',
-            name: 'Code Review',
-            description: 'Reviews the selected repository',
-            enabled: true,
+            name: 'Local Codex',
+            enabled: false,
             workspace: project,
             permissionPolicy: 'deny',
             permissionTimeoutMs: 30_000
         })
-        assert.equal(updated.agents[0].name, 'Code Review')
-        assert.equal(updated.agents[0].workspace, project)
-
-        const inventory = await sessions.listAgents()
-        assert.equal(inventory.length, 1)
-        assert.equal(inventory[0].id, 'codex')
-        assert.equal(inventory[0].workspace, project)
-        assert.equal(inventory[0].enabled, true)
-
-        const persisted = JSON.parse(await readFile(configPath, 'utf8'))
-        assert.equal(persisted.authToken, `env:${secretName}`)
-        assert.equal(persisted.agents.codex.command, process.execPath)
-        assert.deepEqual(persisted.agents.codex.env, { PRESERVE_ME: 'yes' })
-
-        await assert.rejects(
-            () =>
-                control.putAgent('codex', {
-                    driver: 'codex',
-                    enabled: true,
-                    workspace: outside
-                }),
-            /outside the configured allowlist/
-        )
-        assert.equal(
-            JSON.parse(await readFile(configPath, 'utf8')).agents.codex.workspace,
-            project
-        )
-
-        const roots = await control.putWorkspaceRoots([workspaceRoot, outside])
-        assert.deepEqual(roots.workspaceRoots, [workspaceRoot, outside])
-
-        const rotated = await control.rotateAccessKey()
-        assert.match(rotated.accessKey, /^[A-Za-z0-9_-]{40,}$/)
-        assert.equal(control.accessKey(), rotated.accessKey)
-        assert.equal(
-            JSON.parse(await readFile(configPath, 'utf8')).authToken,
-            rotated.accessKey
-        )
-
-        const removed = await control.deleteAgent('codex')
-        assert.deepEqual(removed.agents, [])
-        assert.deepEqual(await sessions.listAgents(), [])
-    } finally {
-        if (previousSecret === undefined) delete process.env[secretName]
-        else process.env[secretName] = previousSecret
-        await rm(directory, { recursive: true, force: true })
-    }
-})
-
-test('first-run Access Key initialization is validated, atomic, and one-time', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-setup-'))
-    const workspaceRoot = path.join(directory, 'repos')
-    const configPath = path.join(directory, 'nexus-agentd.json')
-    await mkdir(workspaceRoot)
-    await writeFile(
-        configPath,
-        JSON.stringify({
-            initialized: false,
-            workspaceRoots: [workspaceRoot],
-            agents: {}
+        await fixture.control.putAgent('remote', {
+            protocol: 'a2a',
+            name: 'Remote Research',
+            agentCardUrl: 'http://192.168.1.20:8080/custom/agent-card.json',
+            preferredTransport: 'http-json',
+            authType: 'header',
+            authHeaderName: 'X-API-Key',
+            authValue: 'remote-agent-secret',
+            timeoutMs: 45_000
         })
-    )
-
-    try {
-        const config = await loadAgentdConfig(configPath)
-        const sessions = new SessionManager(
-            config,
-            await WorkspacePolicy.create(config.workspaceRoots),
-            createDriverRegistry(config)
-        )
-        const control = new AgentdControlPlane(configPath, config, sessions)
-
-        assert.equal(control.isInitialized(), false)
-        assert.equal(control.accessKey(), undefined)
-        await assert.rejects(
-            () => control.initializeAccessKey('1234567', '1234567'),
-            /at least 8 characters/
-        )
-        await assert.rejects(
-            () => control.initializeAccessKey('abcdefgh', 'abcdefgi'),
-            /confirmation does not match/
-        )
-        await assert.rejects(
-            () => control.initializeAccessKey('env:NOT_ALLOWED', 'env:NOT_ALLOWED'),
-            /literal value/
-        )
-
-        const attempts = await Promise.allSettled([
-            control.initializeAccessKey('first-key-123', 'first-key-123'),
-            control.initializeAccessKey('second-key-456', 'second-key-456')
-        ])
+        const snapshot = fixture.control.snapshot()
+        assert.equal(snapshot.agents.find((agent) => agent.id === 'local')?.driver, 'codex')
+        const remote = snapshot.agents.find((agent) => agent.id === 'remote')
+        assert.equal(remote?.protocol, 'a2a')
         assert.equal(
-            attempts.filter((attempt) => attempt.status === 'fulfilled').length,
-            1
+            remote?.agentCardUrl,
+            'http://192.168.1.20:8080/custom/agent-card.json'
         )
-        const rejected = attempts.find(
-            (attempt): attempt is PromiseRejectedResult =>
-                attempt.status === 'rejected'
-        )
-        assert.ok(rejected)
-        assert.ok(rejected.reason instanceof ControlPlaneError)
-        assert.equal(rejected.reason.status, 409)
+        assert.equal(remote?.preferredTransport, 'http-json')
+        assert.equal(remote?.auth?.configured, true)
+        assert.equal(JSON.stringify(snapshot).includes('remote-agent-secret'), false)
 
-        const persisted = JSON.parse(await readFile(configPath, 'utf8'))
-        assert.equal(persisted.initialized, true)
-        assert.equal(persisted.authToken, control.accessKey())
-        const reloaded = await loadAgentdConfig(configPath)
-        assert.equal(reloaded.initialized, true)
-        assert.equal(reloaded.authToken, control.accessKey())
+        await fixture.control.putAgent('legacy-remote', {
+            protocol: 'a2a',
+            name: 'Legacy Remote',
+            agentUrl: 'http://192.168.1.21:8080'
+        })
+        await fixture.control.putAgent('legacy-remote', {
+            protocol: 'a2a',
+            name: 'Renamed Legacy Remote'
+        })
+        const legacyRemote = fixture.control
+            .snapshot()
+            .agents.find((agent) => agent.id === 'legacy-remote')
+        assert.equal(
+            legacyRemote?.agentCardUrl,
+            'http://192.168.1.21:8080/.well-known/agent-card.json'
+        )
+
+        const created = await fixture.control.createApiKey(
+            'Scoped client',
+            { allAgents: false, agentIds: ['remote'] },
+            'custom-client-key-1234'
+        )
+        assert.equal(created.secret, 'custom-client-key-1234')
+        assert.deepEqual(created.key.scope.agentIds, ['remote'])
+        assert.equal(
+            fixture.control.authenticateApiKey('custom-client-key-1234')?.id,
+            created.key.id
+        )
+        assert.equal(
+            fixture.control.revealApiKey(created.key.id).secret,
+            'custom-client-key-1234'
+        )
+
+        const renamed = await fixture.control.updateApiKey(created.key.id, {
+            name: 'Renamed client',
+            enabled: false,
+            scope: { allAgents: true, agentIds: ['remote'] }
+        })
+        assert.equal(renamed.name, 'Renamed client')
+        assert.deepEqual(renamed.scope, { allAgents: true, agentIds: [] })
+        assert.equal(fixture.control.authenticateApiKey('custom-client-key-1234'), undefined)
+
+        const regenerated = await fixture.control.regenerateApiKey(created.key.id)
+        assert.match(regenerated.secret, /^nx_sk_[A-Za-z0-9_-]{30,}$/)
+        assert.equal(regenerated.key.enabled, false)
+        await fixture.control.deleteApiKey(created.key.id)
+        assert.equal(fixture.control.listApiKeys().some((key) => key.id === created.key.id), false)
+
+        const persisted = JSON.parse(await readFile(fixture.configPath, 'utf8'))
+        assert.equal(persisted.authToken, 'legacy-token-value')
+        assert.equal(persisted.agents.remote.auth.value, 'remote-agent-secret')
+        assert.equal(
+            persisted.agents.remote.agentCardUrl,
+            'http://192.168.1.20:8080/custom/agent-card.json'
+        )
+        assert.equal(persisted.agents.remote.agentUrl, undefined)
+        assert.equal(persisted.agents.local.command, undefined)
     } finally {
-        await rm(directory, { recursive: true, force: true })
+        await fixture.close()
     }
 })
+
+async function createFixture(input: Record<string, unknown>) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-control-'))
+    const configPath = path.join(directory, 'nexus-agentd.json')
+    const raw = {
+        workspaceRoots: [directory],
+        ...input
+    }
+    if (Array.isArray(raw.workspaceRoots) && !raw.workspaceRoots.length) {
+        raw.workspaceRoots = [directory]
+    }
+    await writeFile(configPath, JSON.stringify(raw))
+    const config = await loadAgentdConfig(configPath)
+    const policy = await WorkspacePolicy.create(config.workspaceRoots)
+    const sessions = new SessionManager(config, policy, createDriverRegistry(config))
+    const control = new AgentdControlPlane(configPath, config, sessions)
+    return {
+        directory,
+        configPath,
+        sessions,
+        control,
+        async close() {
+            await sessions.shutdown()
+            await rm(directory, { recursive: true, force: true })
+        }
+    }
+}
