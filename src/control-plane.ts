@@ -594,9 +594,10 @@ function validateUpdate(update: AgentdAgentUpdate) {
     if (
         update.permissionPolicy !== undefined &&
         update.permissionPolicy !== 'ask' &&
+        update.permissionPolicy !== 'allow' &&
         update.permissionPolicy !== 'deny'
     ) {
-        throw new ControlPlaneError(400, 'permissionPolicy must be ask or deny')
+        throw new ControlPlaneError(400, 'permissionPolicy must be ask, allow, or deny')
     }
     if (
         update.preferredTransport !== undefined &&

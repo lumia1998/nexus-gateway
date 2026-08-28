@@ -31,6 +31,13 @@ interface PendingInput {
     timer: NodeJS.Timeout
 }
 
+export class InvalidPermissionAnswerError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'InvalidPermissionAnswerError'
+    }
+}
+
 type FormElicitation = acp.CreateElicitationRequest & {
     mode: 'form'
     requestedSchema: acp.ElicitationSchema
@@ -199,9 +206,9 @@ export class AcpProcessRuntime {
                   (item) =>
                       item.id.toLowerCase() === normalized ||
                       item.name.toLowerCase() === normalized
-              )
+              ) || permissionApprovalOption(normalized, options)
         if (!option) {
-            throw new Error(
+            throw new InvalidPermissionAnswerError(
                 `Permission answer must be an option id/name or index: ${options
                     .map((item, index) => `${index + 1}. ${item.name} (${item.id})`)
                     .join('; ')}`
@@ -278,6 +285,23 @@ export class AcpProcessRuntime {
                       outcome: {
                           outcome: 'selected',
                           optionId: reject.optionId
+                      }
+                  }
+                : { outcome: { outcome: 'cancelled' } }
+        }
+        if (this.driver.permissionPolicy === 'allow') {
+            const allow =
+                params.options.find(
+                    (option) => option.kind.toLowerCase() === 'allow_once'
+                ) ||
+                params.options.find((option) =>
+                    option.kind.toLowerCase().startsWith('allow')
+                )
+            return allow
+                ? {
+                      outcome: {
+                          outcome: 'selected',
+                          optionId: allow.optionId
                       }
                   }
                 : { outcome: { outcome: 'cancelled' } }
@@ -552,6 +576,53 @@ export class AcpProcessRuntime {
             size: attachment.bytes.length
         }
     }
+}
+
+function permissionApprovalOption(
+    answer: string,
+    options: NonNullable<AgentdPendingRequest['options']>
+) {
+    const approvals = new Set([
+        'yes',
+        'y',
+        'ok',
+        'okay',
+        'approve',
+        'approved',
+        'accept',
+        'allow',
+        'proceed',
+        '同意',
+        '允许',
+        '允许一次',
+        '确认',
+        '好的',
+        '可以',
+        '继续',
+        '是',
+        '是的'
+    ])
+    if (!approvals.has(answer)) return undefined
+
+    return (
+        options.find((item) => item.kind?.toLowerCase() === 'allow_once') ||
+        options.find((item) => isApprovalOption(item))
+    )
+}
+
+function isApprovalOption(
+    option: NonNullable<AgentdPendingRequest['options']>[number]
+) {
+    const kind = option.kind?.toLowerCase() || ''
+    if (kind.startsWith('allow')) return true
+    const values = [option.id, option.name].map((value) =>
+        value.trim().toLowerCase()
+    )
+    return values.some((value) =>
+        ['allow', 'approve', 'accept', 'permit', '允许', '同意'].some((word) =>
+            value === word || value.startsWith(`${word} `) || value.startsWith(`${word}_`)
+        )
+    )
 }
 
 class PromptTimeoutError extends Error {}

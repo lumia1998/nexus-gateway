@@ -8,7 +8,7 @@ export type AgentdSessionState =
     | 'canceled'
 
 export type AgentdProtocol = 'acp' | 'a2a'
-export type PermissionPolicy = 'ask' | 'deny'
+export type PermissionPolicy = 'ask' | 'allow' | 'deny'
 
 export const agentdDriverKinds = [
     'opencode',

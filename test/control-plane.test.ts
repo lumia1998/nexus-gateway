@@ -108,6 +108,12 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
             snapshot.agents.find((agent) => agent.id === 'local')?.instructions,
             'Use protocol-level user input for confirmations.'
         )
+        assert.equal(snapshot.agents.find((agent) => agent.id === 'local')?.permissionPolicy, 'deny')
+        await fixture.control.putAgent('local', { permissionPolicy: 'allow' })
+        assert.equal(
+            fixture.control.snapshot().agents.find((agent) => agent.id === 'local')?.permissionPolicy,
+            'allow'
+        )
         const remote = snapshot.agents.find((agent) => agent.id === 'remote')
         assert.equal(remote?.protocol, 'a2a')
         assert.equal(

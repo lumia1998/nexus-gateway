@@ -26,8 +26,8 @@ nexus-agentd \
  --workspace "$HOME/projects"
 ```
 
-当前仓库版本 `0.1.6` 已发布到 npm；可用 `npm view nexus-agentd version` 检查 registry 的 latest，
-也可以将安装命令固定为 `nexus-agentd@0.1.6`。
+当前仓库版本 `0.1.8` 已发布到 npm；可用 `npm view nexus-agentd version` 检查 registry 的 latest，
+也可以将安装命令固定为 `nexus-agentd@0.1.8`。
 
 ## 安装与部署
 
@@ -42,15 +42,15 @@ Gateway 不会替你安装 Agent，也不会替你执行 OpenCode、Claude Code 
 
 ### npm 包安装（已发布版本）
 
-`0.1.6` 已发布到 npm。目标版本尚未发布时，请使用下面的源码部署，或将本仓库打包后的 tarball 安装到目标机器。
+`0.1.8` 已发布到 npm。目标版本尚未发布时，请使用下面的源码部署，或将本仓库打包后的 tarball 安装到目标机器。
 
-发布状态可用 `npm view nexus-agentd version` 检查；生产环境需要可复现部署时，建议固定为 `nexus-agentd@0.1.6`。
+发布状态可用 `npm view nexus-agentd version` 检查；生产环境需要可复现部署时，建议固定为 `nexus-agentd@0.1.8`。
 
 生产环境建议使用专用的低权限系统用户，并把 npm 全局包安装到用户目录：
 
 ~~~bash
 NPM_CONFIG_PREFIX="$HOME/.local"
-npm install --global --prefix "$NPM_CONFIG_PREFIX" nexus-agentd@0.1.6
+npm install --global --prefix "$NPM_CONFIG_PREFIX" nexus-agentd@0.1.8
 export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
 ~~~
 
@@ -269,6 +269,11 @@ command -v hermes && hermes acp --check
 
 `workspace` 必须位于 `workspaceRoots` 之下；如果只通过 WebUI 配置，Gateway 会校验并保存这些字段。
 
+ACP Agent 的 `permissionPolicy` 有三种取值：`ask`（默认，每次权限请求交给用户确认）、`allow`（始终允许，
+自动选择 ACP 返回的允许项，不创建等待确认的请求）和 `deny`（始终拒绝，自动选择拒绝项）。`allow` 会放行该
+Agent 发起的所有 ACP 权限请求，请只对可信的 Agent 和工作区使用；没有明确的允许项时 Gateway 会安全地取消请求。
+该字段只适用于 ACP，A2A Agent 不使用本地 ACP 权限策略。
+
 Gateway 会在每个 Agent Session 的首次请求前自动注入一段 Agent Nexus 交互规范，提醒 Agent 在需要
 用户选择、确认、支付或补充信息时使用 ACP elicitation/A2A `input-required`，不要只输出普通文本问题。
 这段规范不需要为 OpenCode、Claude Code 或 Hermes 手工重复配置。若某个 Agent 还需要额外规则，可在 Agent
@@ -336,6 +341,10 @@ HTTP 上传总上限由 `maxAttachmentBytes` 控制，默认 32 MiB，允许调�
 输出文件发布由 Gateway 自己的 `artifactStoragePath` 管理，默认单文件上限 512 MiB、链接有效期
 24 小时。上传和复制均使用流，不把文件编码进 JSON；公开 URL 使用 256 位随机 token，过期文件由
 后台清理。ACP/A2A 返回的内联二进制 Artifact 也会先落入该仓库，再在 Session 响应中改为 URL。
+客户端应使用 Artifact 的 `mediaType` 选择展示方式，而不是把所有产物都当作普通文件：音频使用原生
+音频元素、视频使用原生视频元素，其他内容使用文件元素。`koishi-plugin-agent-nexus` 会分别调用
+Koishi 的 `h.audio`、`h.video`、`h.image` 和 `h.file`；URL 只作为底层传输地址，大文件不会在客户端
+重新编码成 Base64。
 
 ### 多轮输入与确认
 
@@ -350,6 +359,9 @@ POST /v1/sessions/:id/message
 
 Gateway 会复用原来的协议 Session/Task/Context，不会创建新任务。Agent 可以在下一轮再次进入
 `input_required`，因此套餐选择、堂食方式、取餐时间和支付完成可以组成一条连续流程。需要表达业务
+授权时，客户端可以发送可选项的数字序号、ID 或名称；Gateway 也会将常见的 `同意`、`允许`、`可以`、
+`确认`、`yes` 和 `allow` 映射到安全的允许项。无法识别的授权答案会返回 400，并保留等待状态，便于
+客户端根据 `pendingRequest.options` 重新提示用户。
 步骤时，可在 `pendingRequest` 中提供可选的 `step`、`inputType` 和 JSON-safe `metadata`；这些字段
 不应放入密钥或其他敏感信息。支付完成消息仍必须由上游 MCP 根据订单/支付状态核验，不能只信任用户文本。
 

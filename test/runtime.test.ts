@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { A2AClientRuntime } from '../src/a2a/runtime.js'
-import { AcpProcessRuntime } from '../src/acp/runtime.js'
+import {
+    AcpProcessRuntime,
+    InvalidPermissionAnswerError
+} from '../src/acp/runtime.js'
+import { ManagedSession, SessionRequestError } from '../src/session.js'
 
 test('injects Agent Nexus interaction guidance into the first ACP prompt only', async () => {
     const sink = createSink()
@@ -79,16 +83,82 @@ test('permission requests remain pending after invalid input and accept an optio
     })
     assert.equal(sink.state, 'permission_required')
     assert.equal(sink.pendingRequest?.options?.[0].id, 'allow')
-    await assert.rejects(() => runtime.respondPending('not-an-option'), /option id\/name/)
+    await assert.rejects(
+        () => runtime.respondPending('not-an-option'),
+        (error) =>
+            error instanceof InvalidPermissionAnswerError &&
+            /option id\/name/.test(error.message)
+    )
     assert.equal(sink.state, 'permission_required')
     assert.equal(sink.pendingRequest?.id, (runtime as any).pending.request.id)
 
-    await runtime.respondPending('1')
+    await runtime.respondPending('同意')
     assert.deepEqual(await response, {
         outcome: { outcome: 'selected', optionId: 'allow' }
     })
     assert.equal(sink.state, 'running')
     assert.equal(sink.pendingRequest, undefined)
+})
+
+test('allow permission policy selects an allow option without creating a pending request', async () => {
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(
+        { ...driver(), permissionPolicy: 'allow' },
+        sink as any
+    )
+    const response = (runtime as any).requestPermission({
+        toolCall: {
+            toolCallId: 'tool-allow',
+            title: 'Write package.json'
+        },
+        options: [
+            { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+            { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'deny', name: 'Reject', kind: 'reject_once' }
+        ]
+    })
+    assert.deepEqual(response, {
+        outcome: { outcome: 'selected', optionId: 'allow' }
+    })
+    assert.equal(sink.pendingRequest, undefined)
+    assert.equal(sink.state, 'created')
+})
+
+test('invalid permission answers become client errors at the Session boundary', async () => {
+    const session = new ManagedSession(
+        'hermes',
+        'acp',
+        undefined,
+        'owner',
+        100,
+        10_000,
+        'Hermes'
+    )
+    session.attach({
+        async start() {},
+        async prompt() {},
+        async respondPending() {
+            throw new InvalidPermissionAnswerError('unknown permission answer')
+        },
+        async cancel() {},
+        async dispose() {}
+    })
+    session.setPending({
+        id: 'request-1',
+        kind: 'permission',
+        prompt: 'Allow editing?',
+        options: [{ id: 'allow', name: 'Allow once', kind: 'allow_once' }]
+    })
+
+    await assert.rejects(
+        () => session.message('not-an-option'),
+        (error) =>
+            error instanceof SessionRequestError &&
+            error.status === 400 &&
+            error.message === 'unknown permission answer'
+    )
+    assert.equal(session.state, 'permission_required')
+    assert.equal(session.pendingRequest?.id, 'request-1')
 })
 
 test('a canceled prompt cannot overwrite the terminal canceled state', async () => {

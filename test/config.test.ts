@@ -94,6 +94,7 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
                     driver: 'codex',
                     workspace: directory,
                     instructions: 'Use the user-input mechanism for confirmations.',
+                    permissionPolicy: 'allow',
                     args: []
                 },
                 remote: {
@@ -113,6 +114,7 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
             config.agents.local.instructions,
             'Use the user-input mechanism for confirmations.'
         )
+        assert.equal(config.agents.local.permissionPolicy, 'allow')
         assert.equal(config.agents.remote.protocol, 'a2a')
         if (config.agents.remote.protocol === 'a2a') {
             assert.equal(

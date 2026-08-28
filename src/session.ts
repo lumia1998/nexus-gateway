@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { AcpProcessRuntime } from './acp/runtime.js'
+import {
+    AcpProcessRuntime,
+    InvalidPermissionAnswerError
+} from './acp/runtime.js'
 import { A2AClientRuntime, probeA2AAgent } from './a2a/runtime.js'
 import type { AgentDriver } from './drivers/index.js'
 import { SessionEventLog } from './events.js'
@@ -215,7 +218,14 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             this.syncRun({
                 progress: { phase: '继续执行', message: '已提交补充信息' }
             })
-            await this.runtime.respondPending(message, attachments)
+            try {
+                await this.runtime.respondPending(message, attachments)
+            } catch (error) {
+                if (error instanceof InvalidPermissionAnswerError) {
+                    throw new SessionRequestError(400, error.message)
+                }
+                throw error
+            }
             return
         }
         if (this.state === 'running') {

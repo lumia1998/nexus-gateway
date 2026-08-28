@@ -269,7 +269,11 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
     }
     const permissionPolicy =
         optionalString(input.permissionPolicy, `agents.${id}.permissionPolicy`) || 'ask'
-    if (permissionPolicy !== 'ask' && permissionPolicy !== 'deny') {
+    if (
+        permissionPolicy !== 'ask' &&
+        permissionPolicy !== 'allow' &&
+        permissionPolicy !== 'deny'
+    ) {
         throw new Error(`Invalid permissionPolicy for ${id}`)
     }
     const result: AgentdDriverConfig = {
