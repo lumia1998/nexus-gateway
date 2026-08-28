@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+- 新增 Gateway 内置 File Browser、工作区文件 API，以及独立的流式 Artifact 发布仓库；临时下载
+  URL 使用随机 token 和 TTL，不公开工作区目录。
+- ACP/A2A 内联二进制 Artifact 在 Session 响应前自动转为 Gateway URL，避免大文件 Base64 经
+  HTTP/JSON 传给客户端。
+
 - WebUI 重构为 Agent Nexus 管理控制台，并拆分为独立的样式、结构、图标和行为模块。
 - 管理员 Console Password 改为 scrypt 哈希与 HttpOnly Cookie；客户端改用可命名、可限制 Agent
   范围的多 API Key。

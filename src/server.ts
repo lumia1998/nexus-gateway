@@ -1,5 +1,14 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
+import type { FileHandle } from 'node:fs/promises'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
+import path from 'node:path'
+import { pipeline } from 'node:stream/promises'
+import {
+    ArtifactStoreError,
+    contentDisposition,
+    GatewayArtifactStore,
+    mediaTypeForName
+} from './artifact-store.js'
 import { AdminSessionStore } from './auth.js'
 import {
     ControlPlaneError,
@@ -21,10 +30,13 @@ import type {
     AgentdConfig,
     AgentdDriverKind,
     AgentdEvent,
+    AgentdArtifact,
     AgentdProtocol,
+    AgentdSessionView,
     PermissionPolicy
 } from './types.js'
 import { redirectToAgentdWebUi, writeAgentdWebUi } from './webui/index.js'
+import { WorkspaceFileError, WorkspaceFiles } from './workspace-files.js'
 
 const ADMIN_COOKIE = 'agent_nexus_admin'
 
@@ -38,6 +50,19 @@ export function createAgentdServer(
     )
     const loginLimiter = new FailureRateLimiter(8, 60_000, 5 * 60_000)
     const apiLimiter = new FailureRateLimiter(30, 60_000, 60_000)
+    const artifactStore = new GatewayArtifactStore(
+        config.artifactStoragePath || path.resolve('.nexus-agentd-artifacts'),
+        config.artifactTtlMs || 24 * 60 * 60 * 1000,
+        config.maxArtifactBytes || 512 * 1024 * 1024,
+        config.maxArtifactStorageBytes || 4 * 1024 * 1024 * 1024,
+        config.maxPublishedArtifacts || 4096,
+        config.maxConcurrentArtifactPublishes || 4
+    )
+    const workspaceFiles = new WorkspaceFiles(
+        () => controlPlane?.snapshot().workspaceRoots || config.workspaceRoots,
+        config.maxArtifactBytes || 512 * 1024 * 1024
+    )
+    artifactStore.startCleanup(config.cleanupIntervalMs)
     let sseConnections = 0
     const server = http.createServer((request, response) => {
         const requestId = randomUUID()
@@ -49,6 +74,8 @@ export function createAgentdServer(
             adminSessions,
             loginLimiter,
             apiLimiter,
+            artifactStore,
+            workspaceFiles,
             request,
             response,
             acquireSse() {
@@ -88,7 +115,10 @@ export function createAgentdServer(
     server.headersTimeout = Math.min(server.requestTimeout, 20_000)
     server.keepAliveTimeout = 5_000
     server.maxConnections = config.maxConnections || 256
-    server.once('close', () => adminSessions.clear())
+    server.once('close', () => {
+        adminSessions.clear()
+        artifactStore.stopCleanup()
+    })
     return server
 }
 
@@ -99,6 +129,8 @@ interface RequestContext {
     adminSessions: AdminSessionStore
     loginLimiter: FailureRateLimiter
     apiLimiter: FailureRateLimiter
+    artifactStore: GatewayArtifactStore
+    workspaceFiles: WorkspaceFiles
     request: IncomingMessage
     response: ServerResponse
     acquireSse(): boolean
@@ -113,6 +145,8 @@ async function handleRequest(context: RequestContext) {
         adminSessions,
         loginLimiter,
         apiLimiter,
+        artifactStore,
+        workspaceFiles,
         request,
         response
     } = context
@@ -124,6 +158,18 @@ async function handleRequest(context: RequestContext) {
     }
     if ((url.pathname === '/ui' || url.pathname === '/ui/') && request.method === 'GET') {
         writeAgentdWebUi(response)
+        return
+    }
+    const artifactMatch = url.pathname.match(
+        /^\/v1\/artifacts\/([a-f0-9]{64})\/(\d+)\/([^/]+)$/
+    )
+    if (artifactMatch && request.method === 'GET') {
+        const artifact = await artifactStore.open(
+            artifactMatch[1],
+            artifactMatch[2],
+            decodePathSegment(artifactMatch[3])
+        )
+        await streamDownload(response, artifact.handle!, artifact.name, artifact.size, artifact.mediaType)
         return
     }
     if (url.pathname === '/health' && request.method === 'GET') {
@@ -231,9 +277,47 @@ async function handleRequest(context: RequestContext) {
         writeJson(
             response,
             201,
-            await sessions.create(agentId, optionalString(body.workspace), principal.id)
+            await materializeSessionArtifacts(
+                await sessions.create(agentId, optionalString(body.workspace), principal.id),
+                artifactStore
+            )
         )
         return
+    }
+
+    const filesMatch = url.pathname.match(
+        /^\/v1\/sessions\/([^/]+)\/files(?:\/(content|publish))?$/
+    )
+    if (filesMatch) {
+        const sessionId = decodePathSegment(filesMatch[1])
+        const session = ownedSession(sessions, sessionId, principal)
+        const root = await workspaceFiles.sessionRoot(session.workspace)
+        const action = filesMatch[2]
+        if (!action && request.method === 'GET') {
+            writeJson(response, 200, await workspaceFiles.list(root, url.searchParams.get('path') || ''))
+            return
+        }
+        if (action === 'content' && request.method === 'GET') {
+            const file = await workspaceFiles.open(root, requiredQuery(url, 'path'))
+            await streamDownload(response, file.handle, file.name, file.size, mediaTypeForName(file.name))
+            return
+        }
+        if (action === 'publish' && request.method === 'POST') {
+            assertJsonContentType(request)
+            const body = await readJsonBody(request, config.maxRequestBytes)
+            assertOnlyKeys(body, ['paths'])
+            const paths = requiredStringArray(body.paths, 'paths')
+            if (paths.length > 32) throw new RequestError(400, 'paths must contain at most 32 values')
+            const result = await publishWorkspaceFiles(
+                workspaceFiles,
+                artifactStore,
+                root,
+                paths
+            )
+            writeJson(response, result.errors.length ? 207 : 201, result)
+            return
+        }
+        throw new RequestError(405, 'Method not allowed')
     }
 
     const attachmentMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/attachments$/)
@@ -274,7 +358,7 @@ async function handleRequest(context: RequestContext) {
     assertAgentScope(principal, session.agentId)
 
     if (!action && request.method === 'GET') {
-        writeJson(response, 200, session)
+        writeJson(response, 200, await materializeSessionArtifacts(session, artifactStore))
         return
     }
     if (action === 'message' && request.method === 'POST') {
@@ -284,17 +368,24 @@ async function handleRequest(context: RequestContext) {
         writeJson(
             response,
             202,
-            await sessions.message(
-                sessionId,
-                requiredMessage(body.message),
-                optionalAttachmentIds(body.attachments)
+            await materializeSessionArtifacts(
+                await sessions.message(
+                    sessionId,
+                    requiredMessage(body.message),
+                    optionalAttachmentIds(body.attachments)
+                ),
+                artifactStore
             )
         )
         return
     }
     if (action === 'cancel' && request.method === 'POST') {
         await assertEmptyJsonBody(request, config.maxRequestBytes)
-        writeJson(response, 200, await sessions.cancel(sessionId))
+        writeJson(
+            response,
+            200,
+            await materializeSessionArtifacts(await sessions.cancel(sessionId), artifactStore)
+        )
         return
     }
     if (action === 'events' && request.method === 'GET') {
@@ -315,8 +406,87 @@ async function handleRequest(context: RequestContext) {
 }
 
 async function handleAdminRoute(context: RequestContext, url: URL) {
-    const { config, sessions, controlPlane, adminSessions, request, response } = context
+    const {
+        config,
+        sessions,
+        controlPlane,
+        adminSessions,
+        artifactStore,
+        workspaceFiles,
+        request,
+        response
+    } = context
     if (!controlPlane) throw new RequestError(404, 'Control plane is unavailable')
+
+    if (url.pathname === '/v1/admin/files/roots' && request.method === 'GET') {
+        writeJson(response, 200, { roots: await workspaceFiles.roots() })
+        return
+    }
+    if (url.pathname === '/v1/admin/files' && request.method === 'GET') {
+        const root = await workspaceFiles.adminRoot(requiredQuery(url, 'root'))
+        writeJson(response, 200, await workspaceFiles.list(root, url.searchParams.get('path') || ''))
+        return
+    }
+    if (url.pathname === '/v1/admin/files/content') {
+        const root = await workspaceFiles.adminRoot(requiredQuery(url, 'root'))
+        const filePath = requiredQuery(url, 'path')
+        if (request.method === 'GET') {
+            const file = await workspaceFiles.open(root, filePath)
+            await streamDownload(response, file.handle, file.name, file.size, mediaTypeForName(file.name))
+            return
+        }
+        if (request.method === 'PUT') {
+            const declared = optionalContentLength(request)
+            writeJson(response, 201, await workspaceFiles.write(root, filePath, request, declared))
+            return
+        }
+        if (request.method === 'DELETE') {
+            await assertEmptyJsonBody(request, config.maxRequestBytes)
+            writeJson(response, 200, await workspaceFiles.remove(root, filePath))
+            return
+        }
+        throw new RequestError(405, 'Method not allowed')
+    }
+    if (url.pathname === '/v1/admin/files/directory' && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['root', 'path'])
+        const root = await workspaceFiles.adminRoot(requiredString(body.root, 'root'))
+        writeJson(response, 201, await workspaceFiles.createDirectory(root, requiredString(body.path, 'path')))
+        return
+    }
+    if (url.pathname === '/v1/admin/files/move' && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['root', 'path', 'destination'])
+        const root = await workspaceFiles.adminRoot(requiredString(body.root, 'root'))
+        writeJson(
+            response,
+            200,
+            await workspaceFiles.move(
+                root,
+                requiredString(body.path, 'path'),
+                requiredString(body.destination, 'destination')
+            )
+        )
+        return
+    }
+    if (url.pathname === '/v1/admin/files/publish' && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['root', 'paths'])
+        const root = await workspaceFiles.adminRoot(requiredString(body.root, 'root'))
+        const paths = requiredStringArray(body.paths, 'paths')
+        if (paths.length > 32) throw new RequestError(400, 'paths must contain at most 32 values')
+        const result = await publishWorkspaceFiles(
+            workspaceFiles,
+            artifactStore,
+            root,
+            paths
+        )
+        writeJson(response, result.errors.length ? 207 : 201, result)
+        return
+    }
 
     if (url.pathname === '/v1/admin/overview' && request.method === 'GET') {
         const agents = await sessions.listAgents(undefined, url.searchParams.get('refresh') === '1')
@@ -829,6 +999,22 @@ function requiredStringArray(value: unknown, name: string, allowEmpty = false) {
     return result
 }
 
+function requiredQuery(url: URL, name: string) {
+    const value = url.searchParams.get(name)?.trim()
+    if (!value) throw new RequestError(400, `${name} is required`)
+    return value
+}
+
+function optionalContentLength(request: IncomingMessage) {
+    const raw = stringHeader(request.headers['content-length'])
+    if (!raw) return undefined
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value < 0) {
+        throw new RequestError(400, 'Content-Length is invalid')
+    }
+    return value
+}
+
 function cookieValue(request: IncomingMessage, name: string) {
     const cookie = stringHeader(request.headers.cookie)
     for (const part of cookie.split(';')) {
@@ -887,11 +1073,156 @@ function safePath(value?: string) {
     }
 }
 
+function decodePathSegment(value: string) {
+    try {
+        return decodeURIComponent(value)
+    } catch {
+        throw new RequestError(400, 'URL path is invalid')
+    }
+}
+
+function ownedSession(
+    sessions: SessionManager,
+    sessionId: string,
+    principal: AgentdApiKeyPrincipal
+) {
+    const session = sessions.get(sessionId)
+    if (!sessions.owns(sessionId, principal.id)) {
+        throw new RequestError(404, 'Session not found')
+    }
+    assertAgentScope(principal, session.agentId)
+    return session
+}
+
+async function streamDownload(
+    response: ServerResponse,
+    handle: FileHandle,
+    name: string,
+    size: number,
+    mediaType: string
+) {
+    try {
+        response.writeHead(200, {
+            'Content-Type': mediaType,
+            'Content-Length': size,
+            'Content-Disposition': contentDisposition(name),
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff'
+        })
+        await pipeline(handle.createReadStream({ autoClose: false }), response)
+    } finally {
+        await handle.close().catch(() => undefined)
+    }
+}
+
+async function publishWorkspaceFiles(
+    workspaceFiles: WorkspaceFiles,
+    artifactStore: GatewayArtifactStore,
+    root: string,
+    paths: string[]
+) {
+    const files = []
+    const errors: Array<{ path: string; error: string }> = []
+    let firstFailure: { status: number; message: string } | undefined
+    for (const value of paths) {
+        let file: Awaited<ReturnType<WorkspaceFiles['publishable']>> | undefined
+        try {
+            file = await workspaceFiles.publishable(root, value)
+            files.push(await artifactStore.publishHandle(file.handle, file.name))
+        } catch (error) {
+            if (!(error instanceof WorkspaceFileError) && !(error instanceof ArtifactStoreError)) {
+                throw error
+            }
+            firstFailure ||= { status: error.status, message: error.message }
+            errors.push({ path: value, error: error.message })
+        } finally {
+            await file?.handle.close().catch(() => undefined)
+        }
+    }
+    if (!files.length && firstFailure) {
+        throw new RequestError(firstFailure.status, firstFailure.message)
+    }
+    return { files, errors }
+}
+
+async function materializeSessionArtifacts(
+    session: AgentdSessionView,
+    store: GatewayArtifactStore
+): Promise<AgentdSessionView> {
+    const artifacts = await Promise.all(
+        session.artifacts.map(async (artifact, index): Promise<AgentdArtifact> => {
+            if (!artifact.bytesBase64) return artifact
+            let bytes: Buffer
+            try {
+                bytes = decodeArtifactBase64(artifact.bytesBase64)
+            } catch (error) {
+                return omittedArtifact(artifact, errorMessage(error))
+            }
+            try {
+                const published = await store.publishBytes(
+                    bytes,
+                    artifact.filename || artifact.name || `artifact-${artifact.id || randomUUID()}`,
+                    artifact.mediaType,
+                    `${session.id}:${artifact.id || index}`
+                )
+                return {
+                    ...artifact,
+                    name: artifact.name || published.name,
+                    filename: artifact.filename || published.name,
+                    url: published.url,
+                    bytesBase64: undefined,
+                    metadata: {
+                        ...artifact.metadata,
+                        publishedArtifactId: published.id,
+                        size: published.size,
+                        sha256: published.sha256,
+                        expiresAt: published.expiresAt
+                    }
+                }
+            } catch (error) {
+                if (error instanceof ArtifactStoreError && error.status === 413) {
+                    return omittedArtifact(artifact, error.message)
+                }
+                throw error
+            }
+        })
+    )
+    return { ...session, artifacts }
+}
+
+function decodeArtifactBase64(value: string) {
+    const normalized = value.replace(/\s/g, '')
+    if (
+        !normalized ||
+        normalized.length % 4 === 1 ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
+    ) {
+        throw new Error('Artifact contains invalid Base64 data')
+    }
+    const bytes = Buffer.from(normalized, 'base64')
+    if (bytes.toString('base64').replace(/=+$/, '') !== normalized.replace(/=+$/, '')) {
+        throw new Error('Artifact contains invalid Base64 data')
+    }
+    return bytes
+}
+
+function omittedArtifact(artifact: AgentdArtifact, reason: string): AgentdArtifact {
+    return {
+        ...artifact,
+        bytesBase64: undefined,
+        description: [artifact.description, `[binary artifact omitted: ${reason}]`]
+            .filter(Boolean)
+            .join('\n')
+    }
+}
+
 function errorStatus(error: unknown) {
     if (error instanceof RunNotFoundError) return 404
     if (error instanceof SessionNotFoundError) return 404
     if (error instanceof SessionRequestError) return error.status
     if (error instanceof ControlPlaneError) return error.status
+    if (error instanceof ArtifactStoreError) return error.status
+    if (error instanceof WorkspaceFileError) return error.status
     if (error instanceof RequestError) return error.status
     return 500
 }

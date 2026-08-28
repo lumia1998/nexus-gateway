@@ -25,7 +25,7 @@ test('workspace policy accepts descendants and rejects traversal/outside paths',
     }
 })
 
-test('workspace policy rejects symlink escapes', { skip: process.platform === 'win32' }, async (t) => {
+test('workspace policy rejects symlink or junction escapes', async (t) => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-symlink-'))
     const root = path.join(directory, 'allowed')
     const outside = path.join(directory, 'outside')
@@ -34,7 +34,7 @@ test('workspace policy rejects symlink escapes', { skip: process.platform === 'w
     await mkdir(outside, { recursive: true })
     try {
         try {
-            await symlink(outside, link, 'dir')
+            await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code === 'EPERM') {
                 t.skip('symlink creation is not permitted')

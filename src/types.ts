@@ -87,6 +87,18 @@ export interface AgentdConfig {
     workspaceRoots: string[]
     maxRequestBytes: number
     maxAttachmentBytes?: number
+    /** Gateway-owned directory for temporary, anonymously downloadable artifacts. */
+    artifactStoragePath?: string
+    /** Maximum size of one published artifact. */
+    maxArtifactBytes?: number
+    /** Maximum combined size of all retained published artifacts. */
+    maxArtifactStorageBytes?: number
+    /** Maximum number of retained published artifacts. */
+    maxPublishedArtifacts?: number
+    /** Maximum number of simultaneous artifact copies. */
+    maxConcurrentArtifactPublishes?: number
+    /** Lifetime of a published artifact URL. */
+    artifactTtlMs?: number
     maxEventsPerSession: number
     maxOutputChars: number
     sessionTtlMs: number
@@ -99,6 +111,30 @@ export interface AgentdConfig {
     adminSessionTtlMs?: number
     secureAdminCookies?: boolean
     agents: Record<string, AgentdAgentConfig>
+}
+
+export interface AgentdFileRootView {
+    id: string
+    name: string
+    path: string
+}
+
+export interface AgentdFileEntryView {
+    name: string
+    path: string
+    type: 'file' | 'directory' | 'symlink' | 'other'
+    size?: number
+    modifiedAt: number
+}
+
+export interface AgentdPublishedFile {
+    id: string
+    name: string
+    url: string
+    size: number
+    mediaType: string
+    sha256: string
+    expiresAt: number
 }
 
 export interface AgentdAgentView {

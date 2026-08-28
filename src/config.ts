@@ -138,6 +138,45 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
             1024,
             64 * 1024 * 1024
         ),
+        artifactStoragePath: resolveConfigPath(
+            absolute,
+            optionalString(value.artifactStoragePath, 'artifactStoragePath') || './artifacts'
+        ),
+        maxArtifactBytes: integerValue(
+            value.maxArtifactBytes,
+            'maxArtifactBytes',
+            512 * 1024 * 1024,
+            1024,
+            16 * 1024 * 1024 * 1024
+        ),
+        maxArtifactStorageBytes: integerValue(
+            value.maxArtifactStorageBytes,
+            'maxArtifactStorageBytes',
+            4 * 1024 * 1024 * 1024,
+            1024 * 1024,
+            Number.MAX_SAFE_INTEGER
+        ),
+        maxPublishedArtifacts: integerValue(
+            value.maxPublishedArtifacts,
+            'maxPublishedArtifacts',
+            4096,
+            1,
+            1_000_000
+        ),
+        maxConcurrentArtifactPublishes: integerValue(
+            value.maxConcurrentArtifactPublishes,
+            'maxConcurrentArtifactPublishes',
+            4,
+            1,
+            128
+        ),
+        artifactTtlMs: integerValue(
+            value.artifactTtlMs,
+            'artifactTtlMs',
+            24 * 60 * 60 * 1000,
+            60_000,
+            30 * 24 * 60 * 60 * 1000
+        ),
         maxEventsPerSession: integerValue(
             value.maxEventsPerSession,
             'maxEventsPerSession',
@@ -467,6 +506,10 @@ function validateHttpUrl(value: string, name: string) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
         throw new Error(`nexus-agentd ${name} must be an http(s) URL without credentials or a fragment`)
     }
+}
+
+function resolveConfigPath(configPath: string, value: string) {
+    return path.resolve(path.dirname(configPath), value)
 }
 
 function secretsEqual(left: string, right: string) {

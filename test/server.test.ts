@@ -22,7 +22,7 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         const html = await response.text()
         assert.match(html, /Agent Nexus/)
         assert.match(html, /lang="zh-CN"/)
-        for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥', '运行设置']) {
+        for (const label of ['总览', '运行记录', '智能体', '工作区', '文件', 'API 密钥', '运行设置']) {
             assert.match(html, new RegExp(`>${label}<`))
         }
         assert.match(html, /Session 空闲有效期（小时）/)
@@ -291,6 +291,49 @@ test('run history is admin-only, filterable, and exposes bounded details', async
     }
 })
 
+test('admin File Browser streams files and requires Console cookie plus same-origin writes', async () => {
+    const fixture = await startFreshServer('127.0.0.1')
+    try {
+        await fetch(`${fixture.base}/v1/bootstrap/initialize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Origin: fixture.base },
+            body: JSON.stringify({
+                password: 'files-password',
+                confirmPassword: 'files-password'
+            })
+        })
+        const cookie = (await login(fixture.base, 'files-password')).headers.get('set-cookie') || ''
+        assert.equal((await fetch(`${fixture.base}/v1/admin/files/roots`)).status, 401)
+        const roots = await (await adminGet(fixture.base, '/v1/admin/files/roots', cookie)).json()
+        const root = roots.roots[0].id
+        const target = `/v1/admin/files/content?root=${encodeURIComponent(root)}&path=browser.txt`
+        assert.equal(
+            (
+                await fetch(`${fixture.base}${target}`, {
+                    method: 'PUT',
+                    headers: { Cookie: cookie },
+                    body: 'browser body'
+                })
+            ).status,
+            403
+        )
+        const uploaded = await fetch(`${fixture.base}${target}`, {
+            method: 'PUT',
+            headers: { Cookie: cookie, Origin: fixture.base, 'Content-Type': 'text/plain' },
+            body: 'browser body'
+        })
+        assert.equal(uploaded.status, 201)
+        const downloaded = await adminGet(fixture.base, target, cookie)
+        assert.equal(await downloaded.text(), 'browser body')
+        const listed = await (
+            await adminGet(fixture.base, `/v1/admin/files?root=${encodeURIComponent(root)}`, cookie)
+        ).json()
+        assert.ok(listed.entries.some((entry: { name: string }) => entry.name === 'browser.txt'))
+    } finally {
+        await fixture.close()
+    }
+})
+
 test('API Key Agent scope and session ownership are enforced independently', async () => {
     const sessions = new FakeSessions()
     const config = configuredServerConfig()
@@ -390,6 +433,99 @@ test('API Key Agent scope and session ownership are enforced independently', asy
     }
 })
 
+test('session files publish through Gateway-owned expiring URLs without exposing the workspace', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-publish-'))
+    const sessions = new FakeSessions()
+    sessions.workspace = directory
+    const config = configuredServerConfig()
+    config.workspaceRoots = [directory]
+    config.artifactStoragePath = path.join(directory, 'published')
+    config.artifactTtlMs = 60_000
+    await writeFile(path.join(directory, 'report.txt'), 'streamed report')
+    const server = createAgentdServer(config, sessions as any)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+        const createdResponse = await fetch(`${base}/v1/sessions`, {
+            method: 'POST',
+            headers: {
+                Authorization: 'Bearer key-a-secret-value',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ agentId: 'agent-a' })
+        })
+        const created = await createdResponse.json()
+        const publishedResponse = await fetch(`${base}/v1/sessions/${created.id}/files/publish`, {
+            method: 'POST',
+            headers: {
+                Authorization: 'Bearer key-a-secret-value',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ paths: ['report.txt', 'missing.txt'] })
+        })
+        assert.equal(publishedResponse.status, 207)
+        const published = await publishedResponse.json()
+        assert.equal(published.files.length, 1)
+        assert.deepEqual(published.errors, [
+            { path: 'missing.txt', error: 'File or directory not found' }
+        ])
+        assert.match(published.files[0].url, /^\/v1\/artifacts\/[a-f0-9]{64}\//)
+        const download = await fetch(`${base}${published.files[0].url}`)
+        assert.equal(download.status, 200)
+        assert.equal(await download.text(), 'streamed report')
+        assert.match(download.headers.get('content-disposition') || '', /report\.txt/)
+
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}/files/publish`, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: 'Bearer key-b-secret-value',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ paths: ['report.txt'] })
+                })
+            ).status,
+            404
+        )
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}/files/publish`, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: 'Bearer key-a-secret-value',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ paths: ['../outside.txt'] })
+                })
+            ).status,
+            403
+        )
+
+        sessions.setArtifacts(created.id, [
+            {
+                id: 'inline-image',
+                name: 'inline.txt',
+                mediaType: 'text/plain',
+                bytesBase64: Buffer.from('inline artifact').toString('base64')
+            }
+        ])
+        const materializedResponse = await fetch(`${base}/v1/sessions/${created.id}`, {
+            headers: { Authorization: 'Bearer key-a-secret-value' }
+        })
+        const materialized = await materializedResponse.json()
+        assert.equal(materialized.artifacts[0].bytesBase64, undefined)
+        assert.match(materialized.artifacts[0].url, /^\/v1\/artifacts\//)
+        assert.equal(
+            await (await fetch(`${base}${materialized.artifacts[0].url}`)).text(),
+            'inline artifact'
+        )
+    } finally {
+        await closeServer(server)
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
 async function startFreshServer(host: string) {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-server-'))
     const configPath = path.join(directory, 'nexus-agentd.json')
@@ -471,6 +607,7 @@ function configuredServerConfig(): AgentdConfig {
 
 class FakeSessions {
     failInventory = false
+    workspace?: string
     private readonly sessions = new Map<string, AgentdSessionView & { ownerKeyId: string }>()
 
     async listAgents(ids?: Set<string>) {
@@ -493,6 +630,7 @@ class FakeSessions {
             protocol: 'acp' as const,
             agentId,
             state: 'created' as const,
+            workspace: this.workspace,
             artifacts: [],
             createdAt: now,
             updatedAt: now,
@@ -530,6 +668,12 @@ class FakeSessions {
             mediaType,
             size: bytes.length
         }
+    }
+
+    setArtifacts(id: string, artifacts: AgentdSessionView['artifacts']) {
+        const session = this.sessions.get(id)
+        if (!session) throw new Error('not found')
+        session.artifacts = artifacts
     }
 }
 

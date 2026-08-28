@@ -16,6 +16,10 @@ export const app = String.raw`
     runSearch: '',
     runAgent: 'all',
     runStatus: 'all',
+    fileRoots: [],
+    fileRoot: '',
+    filePath: '',
+    fileEntries: [],
     authenticated: false
   }
 
@@ -24,6 +28,7 @@ export const app = String.raw`
     runs: ['运行记录', '追踪当前任务进度，并查看已完成或失败的历史任务。'],
     agents: ['智能体', '配置本地 ACP 进程和远程 A2A 智能体。'],
     workspaces: ['工作区', '管理 ACP 智能体允许访问的路径。'],
+    files: ['文件', '浏览工作区文件，并生成有时效的外部下载链接。'],
     keys: ['API 密钥', '管理 Agent Nexus 数据接口的客户端凭据。'],
     settings: ['运行设置', '调整会话生命周期、任务超时和后台清理周期。']
   }
@@ -196,7 +201,8 @@ export const app = String.raw`
       api('/v1/admin/config'),
       api('/v1/admin/api-keys'),
       api('/v1/admin/overview' + suffix),
-      api('/v1/admin/runs?limit=200')
+      api('/v1/admin/runs?limit=200'),
+      api('/v1/admin/files/roots')
     ])
     state.config = values[0]
     state.apiKeys = values[1].apiKeys || []
@@ -204,6 +210,12 @@ export const app = String.raw`
     state.sessions = values[2].sessions || 0
     state.runs = values[3].runs || []
     state.runTotal = values[3].total || 0
+    state.fileRoots = values[4].roots || []
+    if (!state.fileRoots.some((root) => root.id === state.fileRoot)) {
+      state.fileRoot = state.fileRoots[0] ? state.fileRoots[0].id : ''
+      state.filePath = ''
+      state.fileEntries = []
+    }
   }
 
   async function refreshRuns(showNotice) {
@@ -241,6 +253,7 @@ export const app = String.raw`
     if (state.page === 'runs') renderRuns()
     if (state.page === 'agents') renderAgents()
     if (state.page === 'workspaces') renderWorkspaces()
+    if (state.page === 'files') renderFiles()
     if (state.page === 'keys') renderApiKeys()
     if (state.page === 'settings') renderSettings()
   }
@@ -460,6 +473,120 @@ export const app = String.raw`
       roots.map((root, index) => '<div class="list-row"><div class="list-row-main"><strong class="path">' + escapeHtml(root) + '</strong><small>ACP 会话允许访问的根目录</small></div><div class="row-actions"><button class="button small" data-workspace-edit="' + index + '">编辑</button><button class="button small danger" data-workspace-delete="' + index + '"' + (roots.length === 1 ? ' disabled' : '') + '>删除</button></div></div>').join('') +
       '</div><div class="tip">建议仅添加必要的最小目录范围。启动 ACP 会话前，Agent Nexus 会解析并校验真实路径。</div>'
     byId('add-workspace').onclick = () => openWorkspaceDrawer()
+  }
+
+  function renderFiles() {
+    const rootOptions = state.fileRoots.map((root) => '<option value="' + escapeHtml(root.id) + '"' + selected(state.fileRoot, root.id) + '>' + escapeHtml(root.name + ' · ' + root.path) + '</option>').join('')
+    actions.innerHTML = '<button id="refresh-files" class="button">刷新</button><button id="new-directory" class="button">新建目录</button><button id="upload-file" class="button primary">上传文件</button><input id="file-upload-input" class="hidden" type="file" multiple>'
+    content.innerHTML =
+      '<div class="file-toolbar"><select id="file-root-select" aria-label="工作区根目录">' + rootOptions + '</select><button class="button small" id="file-up"' + (state.filePath ? '' : ' disabled') + '>返回上级</button><code class="file-current-path">/' + escapeHtml(state.filePath.replace(/\\/g, '/')) + '</code></div>' +
+      (state.fileRoots.length
+        ? '<div class="table-wrap"><table class="file-table"><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th></th></tr></thead><tbody>' +
+          (state.fileEntries.length ? state.fileEntries.map(fileRow).join('') : '<tr><td colspan="5" class="empty">此目录为空。</td></tr>') +
+          '</tbody></table></div><div class="tip">“发布链接”会把文件流式复制到 Gateway 的独立临时仓库；不会公开工作区目录。链接默认 24 小时后失效，可在配置中调整。</div>'
+        : '<div class="panel"><div class="empty">没有可用的工作区根目录。</div></div>')
+    byId('refresh-files').onclick = () => refreshFiles(true)
+    byId('new-directory').onclick = () => createDirectory()
+    byId('upload-file').onclick = () => byId('file-upload-input').click()
+    byId('file-upload-input').onchange = (event) => uploadFiles(Array.from(event.target.files || []))
+    byId('file-root-select').onchange = (event) => {
+      state.fileRoot = event.target.value
+      state.filePath = ''
+      void refreshFiles(false)
+    }
+    byId('file-up').onclick = () => {
+      state.filePath = parentFilePath(state.filePath)
+      void refreshFiles(false)
+    }
+  }
+
+  function fileRow(entry) {
+    const name = escapeHtml(entry.name)
+    const encodedRoot = encodeURIComponent(state.fileRoot)
+    const encodedPath = encodeURIComponent(entry.path)
+    const primary = entry.type === 'directory'
+      ? '<button class="file-name-button" data-file-open="' + encodedPath + '">📁 <span>' + name + '</span></button>'
+      : '<span class="file-name">📄 <span>' + name + '</span></span>'
+    const download = entry.type === 'file'
+      ? '<a class="button small" href="/v1/admin/files/content?root=' + encodedRoot + '&path=' + encodedPath + '" download>下载</a><button class="button small" data-file-publish="' + encodedPath + '">发布链接</button>'
+      : ''
+    return '<tr><td>' + primary + '</td><td>' + fileTypeLabel(entry.type) + '</td><td>' + (entry.size == null ? '—' : formatBytes(entry.size)) + '</td><td>' + formatDate(entry.modifiedAt) + '</td><td><div class="row-actions">' + download + '<button class="button small" data-file-rename="' + encodedPath + '">重命名</button><button class="button small danger" data-file-delete="' + encodedPath + '">删除</button></div></td></tr>'
+  }
+
+  async function refreshFiles(showNotice) {
+    if (!state.fileRoot) { state.fileEntries = []; renderFiles(); return }
+    await runAction(async () => {
+      const value = await api('/v1/admin/files?root=' + encodeURIComponent(state.fileRoot) + '&path=' + encodeURIComponent(state.filePath))
+      state.filePath = value.path || ''
+      state.fileEntries = value.entries || []
+      if (state.page === 'files') renderFiles()
+      if (showNotice) toast('文件列表已刷新')
+    })
+  }
+
+  async function uploadFiles(files) {
+    if (!files.length || !state.fileRoot) return
+    await runAction(async () => {
+      for (const file of files) {
+        const target = joinFilePath(state.filePath, file.name)
+        const response = await fetch('/v1/admin/files/content?root=' + encodeURIComponent(state.fileRoot) + '&path=' + encodeURIComponent(target), {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file
+        })
+        let value = null
+        try { value = await response.json() } catch {}
+        if (!response.ok) throw new Error(localizeError(value && value.error ? value.error : '上传失败（HTTP ' + response.status + '）'))
+      }
+      await refreshFiles(false)
+      toast('已上传 ' + files.length + ' 个文件')
+    })
+  }
+
+  async function createDirectory() {
+    const name = prompt('新目录名称')
+    if (!name) return
+    await runAction(async () => {
+      await api('/v1/admin/files/directory', { method: 'POST', body: { root: state.fileRoot, path: joinFilePath(state.filePath, name) } })
+      await refreshFiles(false)
+      toast('目录已创建')
+    })
+  }
+
+  async function publishFile(filePath) {
+    await runAction(async () => {
+      const value = await api('/v1/admin/files/publish', { method: 'POST', body: { root: state.fileRoot, paths: [filePath] } })
+      const files = value.files || []
+      const body = files.map((file) => {
+        const url = new URL(file.url, location.origin).toString()
+        return '<div class="published-file"><strong>' + escapeHtml(file.name) + '</strong><a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a><small>有效期至 ' + escapeHtml(formatDate(file.expiresAt)) + ' · ' + escapeHtml(formatBytes(file.size)) + '</small></div>'
+      }).join('')
+      openDrawer('已发布临时链接', '<div class="published-files">' + body + '</div>', '', null)
+      toast('临时下载链接已生成')
+    })
+  }
+
+  function parentFilePath(value) {
+    const parts = String(value || '').replace(/\\/g, '/').split('/').filter(Boolean)
+    parts.pop()
+    return parts.join('/')
+  }
+
+  function joinFilePath(parent, name) {
+    return [String(parent || '').replace(/\\/g, '/').replace(/\/$/, ''), String(name || '').replace(/^[/\\]+/, '')].filter(Boolean).join('/')
+  }
+
+  function fileTypeLabel(value) {
+    return value === 'directory' ? '目录' : value === 'file' ? '文件' : value === 'symlink' ? '符号链接' : '其他'
+  }
+
+  function formatBytes(value) {
+    const size = Number(value) || 0
+    if (size < 1024) return size + ' B'
+    if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB'
+    if (size < 1024 * 1024 * 1024) return (size / 1024 / 1024).toFixed(1) + ' MB'
+    return (size / 1024 / 1024 / 1024).toFixed(1) + ' GB'
   }
 
   function renderApiKeys() {
@@ -718,6 +845,37 @@ export const app = String.raw`
       })
       return
     }
+    if (button.dataset.fileOpen) {
+      state.filePath = decodeURIComponent(button.dataset.fileOpen)
+      await refreshFiles(false)
+      return
+    }
+    if (button.dataset.filePublish) {
+      await publishFile(decodeURIComponent(button.dataset.filePublish))
+      return
+    }
+    if (button.dataset.fileRename) {
+      const source = decodeURIComponent(button.dataset.fileRename)
+      const currentName = source.replace(/\\/g, '/').split('/').pop()
+      const name = prompt('新名称', currentName)
+      if (!name || name === currentName) return
+      await runAction(async () => {
+        await api('/v1/admin/files/move', { method: 'POST', body: { root: state.fileRoot, path: source, destination: joinFilePath(parentFilePath(source), name) } })
+        await refreshFiles(false)
+        toast('文件已重命名')
+      })
+      return
+    }
+    if (button.dataset.fileDelete) {
+      const target = decodeURIComponent(button.dataset.fileDelete)
+      if (!confirm('确定删除“' + target + '”吗？目录会连同其内容一起删除。')) return
+      await runAction(async () => {
+        await api('/v1/admin/files/content?root=' + encodeURIComponent(state.fileRoot) + '&path=' + encodeURIComponent(target), { method: 'DELETE' })
+        await refreshFiles(false)
+        toast('已删除')
+      })
+      return
+    }
     if (button.dataset.keyAction) await handleKeyAction(button.dataset.keyAction, button.dataset.keyId)
   }
 
@@ -846,6 +1004,7 @@ export const app = String.raw`
       state.page = item.dataset.page
       render()
       if (state.page === 'runs') void refreshRuns(false)
+      if (state.page === 'files') void refreshFiles(false)
     }
   })
   content.addEventListener('click', (event) => { void handleContentClick(event) })
