@@ -28,6 +28,7 @@
       "protocol": "acp",
       "driver": "codex",
       "name": "Codex",
+      "instructions": "如果外部工具需要用户选择、确认或支付，请使用宿主的用户输入机制并保持任务等待；不要只输出普通文本问题。",
       "command": "codex-acp",
       "workspace": "/data/repos/project",
       "permissionPolicy": "ask"

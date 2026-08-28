@@ -32,6 +32,8 @@ export interface AgentdDriverConfig {
     args?: string[]
     inheritEnv?: string[]
     env?: Record<string, string>
+    /** Optional extra instructions appended to the built-in Agent Nexus guidance. */
+    instructions?: string
     permissionPolicy?: PermissionPolicy
     permissionTimeoutMs?: number
 }
@@ -43,6 +45,8 @@ export interface AgentdA2AConfig {
     protocol: 'a2a'
     name?: string
     description?: string
+    /** Optional extra instructions sent with the first A2A user message. */
+    instructions?: string
     enabled?: boolean
     /** Full Agent Card JSON URL. Preferred for new configurations. */
     agentCardUrl?: string
@@ -157,6 +161,7 @@ export interface AgentdAgentConfigView {
     protocol: AgentdProtocol
     name: string
     description?: string
+    instructions?: string
     enabled: boolean
     driver?: AgentdDriverKind
     workspace?: string
@@ -216,11 +221,17 @@ export interface AgentdPendingRequest {
     id: string
     kind: 'permission' | 'input'
     prompt: string
+    /** Optional business-facing step, for example `payment` or `pickup_time`. */
+    step?: string
+    /** Optional hint for clients rendering the pending interaction. */
+    inputType?: 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown'
     options?: Array<{
         id: string
         name: string
         kind?: string
     }>
+    /** JSON-safe metadata for the owning integration. Never put secrets here. */
+    metadata?: Record<string, unknown>
 }
 
 export interface AgentdArtifact {

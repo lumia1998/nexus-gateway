@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmod, open, readFile, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { hashAdminPassword, validateAdminPassword, verifyAdminPassword } from './auth.js'
+import { normalizeAgentInstructions } from './agent-instructions.js'
 import { loadAgentdConfig } from './config.js'
 import { createDriverRegistry } from './drivers/index.js'
 import type { SessionManager } from './session.js'
@@ -28,6 +29,7 @@ export interface AgentdAgentUpdate {
     driver?: AgentdDriverKind
     name?: string
     description?: string
+    instructions?: string
     enabled?: boolean
     workspace?: string
     permissionPolicy?: PermissionPolicy
@@ -384,6 +386,10 @@ export class AgentdControlPlane {
                 next.name = cleanString(update.name) || cleanString(previous.name)
             }
         }
+        setOptionalInstructions(
+            next,
+            update.instructions ?? cleanString(previous.instructions)
+        )
         setOptionalString(next, 'description', update.description ?? cleanString(previous.description))
         agents[id] = next
         raw.agents = agents
@@ -523,6 +529,7 @@ export class AgentdControlPlane {
                 protocol: 'a2a',
                 name: config.name || id,
                 description: config.description,
+                instructions: config.instructions,
                 enabled: config.enabled !== false,
                 agentCardUrl: config.agentCardUrl || defaultAgentCardUrl(config.agentUrl),
                 agentUrl: config.agentUrl,
@@ -541,6 +548,7 @@ export class AgentdControlPlane {
             driver: config.driver,
             name: config.name || id,
             description: config.description,
+            instructions: config.instructions,
             enabled: config.enabled !== false,
             workspace: config.workspace || this.config.workspaceRoots[0] || '',
             permissionPolicy: config.permissionPolicy || 'ask',
@@ -707,6 +715,17 @@ function setOptionalString(
     const text = cleanString(value)
     if (text) target[key] = text
     else delete target[key]
+}
+
+function setOptionalInstructions(target: Record<string, unknown>, value: string | undefined) {
+    let text: string | undefined
+    try {
+        text = normalizeAgentInstructions(value)
+    } catch (error) {
+        throw new ControlPlaneError(400, errorMessage(error))
+    }
+    if (text) target.instructions = text
+    else delete target.instructions
 }
 
 function validHeaderName(value: string) {

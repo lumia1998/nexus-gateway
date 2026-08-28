@@ -448,7 +448,8 @@ export class SessionManager {
                       driver!,
                       session,
                       this.config.maxOutputChars,
-                      this.config.promptTimeoutMs || 30 * 60_000
+                      this.config.promptTimeoutMs || 30 * 60_000,
+                      config.instructions
                   )
         this.sessions.set(session.id, session)
         session.attach(runtime)

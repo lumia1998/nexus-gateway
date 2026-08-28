@@ -5,6 +5,10 @@ import { Readable, Writable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as acp from '@agentclientprotocol/sdk'
+import {
+    buildAgentInstructions,
+    composeInitialAgentPrompt
+} from '../agent-instructions.js'
 import type { AgentDriver } from '../drivers/index.js'
 import type { AcpSessionSink } from '../session-contract.js'
 import type {
@@ -41,6 +45,8 @@ export class AcpProcessRuntime {
     private prompting = false
     private readonly maxStderrChunkChars: number
     private readonly promptTimeoutMs: number
+    private readonly instructions: string
+    private firstPrompt = true
     private promptCapabilities: acp.PromptCapabilities = {}
     private inputDirectory?: string
 
@@ -48,13 +54,15 @@ export class AcpProcessRuntime {
         private readonly driver: AgentDriver,
         private readonly sink: AcpSessionSink,
         maxStderrChunkChars = 16 * 1024,
-        promptTimeoutMs = 30 * 60 * 1000
+        promptTimeoutMs = 30 * 60 * 1000,
+        customInstructions?: string
     ) {
         const limit = Number.isFinite(maxStderrChunkChars)
             ? Math.floor(maxStderrChunkChars)
             : 16 * 1024
         this.maxStderrChunkChars = Math.max(1, Math.min(16 * 1024, limit))
         this.promptTimeoutMs = Math.max(10_000, Math.trunc(promptTimeoutMs))
+        this.instructions = buildAgentInstructions(customInstructions)
     }
 
     async start(workspace: string) {
@@ -131,11 +139,15 @@ export class AcpProcessRuntime {
         this.prompting = true
         this.sink.clearPending()
         this.sink.setState('running')
+        const promptMessage = this.firstPrompt
+            ? composeInitialAgentPrompt(this.instructions, message)
+            : message
+        this.firstPrompt = false
         try {
             const response = await withTimeout(
                 this.connection.agent.request(acp.methods.agent.session.prompt, {
                     sessionId,
-                    prompt: await this.promptBlocks(message, attachments)
+                    prompt: await this.promptBlocks(promptMessage, attachments)
                 }),
                 this.promptTimeoutMs,
                 'ACP prompt timed out'

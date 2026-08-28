@@ -17,6 +17,10 @@ import {
     JsonRpcTransportFactory,
     RestTransportFactory
 } from '@a2a-js/sdk/client'
+import {
+    buildAgentInstructions,
+    composeInitialAgentPrompt
+} from '../agent-instructions.js'
 import type { AgentSessionRuntime, AgentSessionSink } from '../session-contract.js'
 import type {
     AgentdA2AConfig,
@@ -66,6 +70,8 @@ export class A2AClientRuntime implements AgentSessionRuntime {
     private taskId = ''
     private contextId = ''
     private prompting = false
+    private firstPrompt = true
+    private readonly instructions: string
     private disposed = false
     private activeController?: AbortController
     private readonly artifactCache = new Map<string, AgentdArtifact>()
@@ -75,7 +81,9 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         private readonly config: AgentdA2AConfig,
         private readonly sink: AgentSessionSink,
         private readonly promptTimeoutMs: number
-    ) {}
+    ) {
+        this.instructions = buildAgentInstructions(config.instructions)
+    }
 
     async start() {
         const resolver = createResolver(this.config)
@@ -101,6 +109,10 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.prompting = true
         this.sink.clearPending()
         this.sink.setState('running')
+        const promptMessage = this.firstPrompt
+            ? composeInitialAgentPrompt(this.instructions, message)
+            : message
+        this.firstPrompt = false
         const controller = new AbortController()
         this.activeController = controller
         const timer = setTimeout(
@@ -109,7 +121,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         )
         timer.unref?.()
         try {
-            const request = this.messageRequest(message, attachments)
+            const request = this.messageRequest(promptMessage, attachments)
             for await (const response of this.client.sendMessageStream(request, {
                 signal: controller.signal
             })) {

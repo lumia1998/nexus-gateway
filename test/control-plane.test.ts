@@ -86,6 +86,7 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
             protocol: 'acp',
             driver: 'codex',
             name: 'Local Codex',
+            instructions: 'Use protocol-level user input for confirmations.',
             enabled: false,
             workspace: project,
             permissionPolicy: 'deny',
@@ -103,6 +104,10 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
         })
         const snapshot = fixture.control.snapshot()
         assert.equal(snapshot.agents.find((agent) => agent.id === 'local')?.driver, 'codex')
+        assert.equal(
+            snapshot.agents.find((agent) => agent.id === 'local')?.instructions,
+            'Use protocol-level user input for confirmations.'
+        )
         const remote = snapshot.agents.find((agent) => agent.id === 'remote')
         assert.equal(remote?.protocol, 'a2a')
         assert.equal(
@@ -170,6 +175,10 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
         )
         assert.equal(persisted.agents.remote.agentUrl, undefined)
         assert.equal(persisted.agents.local.command, undefined)
+        assert.equal(
+            persisted.agents.local.instructions,
+            'Use protocol-level user input for confirmations.'
+        )
     } finally {
         await fixture.close()
     }

@@ -269,6 +269,12 @@ command -v hermes && hermes acp --check
 
 `workspace` 必须位于 `workspaceRoots` 之下；如果只通过 WebUI 配置，Gateway 会校验并保存这些字段。
 
+Gateway 会在每个 Agent Session 的首次请求前自动注入一段 Agent Nexus 交互规范，提醒 Agent 在需要
+用户选择、确认、支付或补充信息时使用 ACP elicitation/A2A `input-required`，不要只输出普通文本问题。
+这段规范不需要为 OpenCode、Claude Code 或 Hermes 手工重复配置。若某个 Agent 还需要额外规则，可在 Agent
+配置中增加 `instructions`；它会在内置规范之后追加，并限制为最多 32768 个字符。提示词注入只是行为约定，
+Agent 仍必须实际支持相应的 ACP/A2A/MCP 用户输入机制，Gateway 不会把普通文本自动猜成等待状态。
+
 ### A2A
 
 A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现名称、能力和实际调用地址，
@@ -280,6 +286,7 @@ A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现
 {
   "protocol": "a2a",
   "name": "Research Agent",
+  "instructions": "需要用户确认时保持任务等待，并使用 Agent 的 input-required 能力。",
   "agentCardUrl": "http://192.168.1.20:8080/.well-known/agent-card.json",
   "preferredTransport": "auto",
   "auth": {
@@ -329,6 +336,27 @@ HTTP 上传总上限由 `maxAttachmentBytes` 控制，默认 32 MiB，允许调�
 输出文件发布由 Gateway 自己的 `artifactStoragePath` 管理，默认单文件上限 512 MiB、链接有效期
 24 小时。上传和复制均使用流，不把文件编码进 JSON；公开 URL 使用 256 位随机 token，过期文件由
 后台清理。ACP/A2A 返回的内联二进制 Artifact 也会先落入该仓库，再在 Session 响应中改为 URL。
+
+### 多轮输入与确认
+
+ACP elicitation、ACP permission request 和 A2A `input_required` 都会让 Session 进入等待状态，并在
+Session 响应的 `pendingRequest` 中返回等待提示和可选项。客户端只需重复调用同一个
+`POST /v1/sessions/:id/message`：
+
+~~~text
+POST /v1/sessions/:id/message
+{"message":"第一个"}
+~~~
+
+Gateway 会复用原来的协议 Session/Task/Context，不会创建新任务。Agent 可以在下一轮再次进入
+`input_required`，因此套餐选择、堂食方式、取餐时间和支付完成可以组成一条连续流程。需要表达业务
+步骤时，可在 `pendingRequest` 中提供可选的 `step`、`inputType` 和 JSON-safe `metadata`；这些字段
+不应放入密钥或其他敏感信息。支付完成消息仍必须由上游 MCP 根据订单/支付状态核验，不能只信任用户文本。
+
+对 ACP Agent，Gateway 会在 Session 首次 prompt 前注入内置交互规范；对 A2A Agent，则把同一规范放在首个
+用户消息的前缀中。由于 A2A/ACP 的 system-message 能力在不同 Agent 实现中并不统一，这是一种兼容性更好的
+宿主提示方式。它不能替代 Agent 对 elicitation 或 `input-required` 的实现：Agent 必须真正发起协议级等待，
+Gateway 才能暂停 Session 并在用户回复后继续。
 
 API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
 旧 `authToken` 复制到该字段。

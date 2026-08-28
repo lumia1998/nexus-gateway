@@ -91,3 +91,36 @@ test('creates one run for each delegated task and tracks real session progress',
         await rm(directory, { recursive: true, force: true })
     }
 })
+
+test('keeps structured pending input metadata in the session snapshot', () => {
+    const session = new ManagedSession(
+        'hermes',
+        'acp',
+        '/workspace',
+        'owner-key',
+        64,
+        64 * 1024,
+        'Hermes Agent'
+    )
+
+    session.setPending({
+        id: 'pending-payment',
+        kind: 'input',
+        prompt: '支付后回复“支付完成”',
+        step: 'payment',
+        inputType: 'payment',
+        options: [{ id: 'paid', name: '支付完成' }],
+        metadata: { orderId: 'order-1', expiresAt: 123 }
+    })
+
+    assert.deepEqual(session.snapshot().pendingRequest, {
+        id: 'pending-payment',
+        kind: 'input',
+        prompt: '支付后回复“支付完成”',
+        step: 'payment',
+        inputType: 'payment',
+        options: [{ id: 'paid', name: '支付完成' }],
+        metadata: { orderId: 'order-1', expiresAt: 123 }
+    })
+    assert.equal(session.snapshot().state, 'input_required')
+})

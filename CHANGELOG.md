@@ -2,8 +2,12 @@
 
 本项目遵循语义化版本，记录 Nexus Gateway 面向使用者的重要变化。
 
-## [Unreleased]
+## [0.1.7] - 2026-08-28
 
+- 新增 Gateway 内置 Agent Nexus 交互规范，并支持每个 Agent 配置额外的 `instructions`。规范只在首次 ACP/A2A
+  prompt 前注入一次，提醒 Agent 使用协议级用户输入处理多轮确认，而不是用普通文本提问后结束任务。
+- 扩展 `pendingRequest` wire type，支持业务步骤、输入类型和 JSON-safe metadata；Session 继续复用原
+  协议任务处理多轮输入。
 - 新增 Gateway 内置 File Browser、工作区文件 API，以及独立的流式 Artifact 发布仓库；临时下载
   URL 使用随机 token 和 TTL，不公开工作区目录。
 - ACP/A2A 内联二进制 Artifact 在 Session 响应前自动转为 Gateway URL，避免大文件 Base64 经

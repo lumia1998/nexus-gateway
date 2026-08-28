@@ -1,5 +1,6 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { normalizeAgentInstructions } from './agent-instructions.js'
 import {
     agentdDriverKinds,
     type A2AAuthType,
@@ -276,6 +277,10 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
         driver,
         name: optionalString(input.name, `agents.${id}.name`),
         description: optionalString(input.description, `agents.${id}.description`),
+        instructions: normalizeAgentInstructions(
+            input.instructions,
+            `agents.${id}.instructions`
+        ),
         enabled: optionalBoolean(input.enabled, `agents.${id}.enabled`) ?? true,
         workspace: optionalString(input.workspace, `agents.${id}.workspace`),
         command: optionalString(input.command, `agents.${id}.command`),
@@ -344,6 +349,10 @@ function parseA2AAgent(id: string, input: Record<string, unknown>): AgentdA2ACon
         protocol: 'a2a',
         name: optionalString(input.name, `agents.${id}.name`),
         description: optionalString(input.description, `agents.${id}.description`),
+        instructions: normalizeAgentInstructions(
+            input.instructions,
+            `agents.${id}.instructions`
+        ),
         enabled: optionalBoolean(input.enabled, `agents.${id}.enabled`) ?? true,
         agentCardUrl,
         agentUrl,

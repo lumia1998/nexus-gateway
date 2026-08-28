@@ -93,10 +93,12 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
                     protocol: 'acp',
                     driver: 'codex',
                     workspace: directory,
+                    instructions: 'Use the user-input mechanism for confirmations.',
                     args: []
                 },
                 remote: {
                     protocol: 'a2a',
+                    instructions: 'Keep payment tasks pending until verified.',
                     agentCardUrl: 'http://192.168.1.20:8080/custom/card.json',
                     preferredTransport: 'http-json',
                     auth: { type: 'bearer', value: `env:${secretName}` },
@@ -107,6 +109,10 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
         await writeFile(configPath, JSON.stringify(base))
         const config = await loadAgentdConfig(configPath)
         assert.equal(config.agents.local.protocol, 'acp')
+        assert.equal(
+            config.agents.local.instructions,
+            'Use the user-input mechanism for confirmations.'
+        )
         assert.equal(config.agents.remote.protocol, 'a2a')
         if (config.agents.remote.protocol === 'a2a') {
             assert.equal(
@@ -116,7 +122,20 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
             assert.equal(config.agents.remote.preferredTransport, 'http-json')
             assert.equal(config.agents.remote.auth?.value, 'remote-secret')
             assert.equal(config.agents.remote.timeoutMs, 45_000)
+            assert.equal(
+                config.agents.remote.instructions,
+                'Keep payment tasks pending until verified.'
+            )
         }
+
+        await writeFile(
+            configPath,
+            JSON.stringify({
+                ...base,
+                agents: { local: { protocol: 'acp', driver: 'codex', instructions: true } }
+            })
+        )
+        await assert.rejects(() => loadAgentdConfig(configPath), /instructions must be a string/)
 
         await writeFile(configPath, JSON.stringify({ ...base, maxSessions: '64' }))
         await assert.rejects(() => loadAgentdConfig(configPath), /maxSessions must be an integer/)

@@ -1,7 +1,68 @@
 import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
+import { A2AClientRuntime } from '../src/a2a/runtime.js'
 import { AcpProcessRuntime } from '../src/acp/runtime.js'
+
+test('injects Agent Nexus interaction guidance into the first ACP prompt only', async () => {
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(
+        driver(),
+        sink as any,
+        16 * 1024,
+        1000,
+        'Use Chinese for user-facing confirmations.'
+    )
+    const prompts: any[] = []
+    ;(runtime as any).connection = {
+        agent: {
+            async request(_method: unknown, params: any) {
+                if (params?.prompt) prompts.push(params.prompt)
+                return { stopReason: 'end_turn' }
+            }
+        }
+    }
+
+    await runtime.prompt('帮我下单')
+    await runtime.prompt('堂食')
+
+    assert.equal(prompts.length, 2)
+    assert.match(prompts[0][0].text, /agent-nexus-host-instructions/)
+    assert.match(prompts[0][0].text, /elicitation|permission request/)
+    assert.match(prompts[0][0].text, /Use Chinese for user-facing confirmations\./)
+    assert.match(prompts[0][0].text, /<user-request>\n帮我下单/)
+    assert.equal(prompts[1][0].text, '堂食')
+})
+
+test('injects Agent Nexus interaction guidance into the first A2A message only', async () => {
+    const sink = createSink()
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: 'http://127.0.0.1:8787/.well-known/agent-card.json',
+            instructions: 'Ask for confirmation before irreversible actions.'
+        },
+        sink as any,
+        1000
+    )
+    const requests: any[] = []
+    ;(runtime as any).card = { defaultOutputModes: ['text/plain'] }
+    ;(runtime as any).client = {
+        async *sendMessageStream(request: any) {
+            requests.push(request)
+        }
+    }
+
+    await runtime.prompt('帮我下单')
+    await runtime.prompt('支付完成')
+
+    assert.equal(requests.length, 2)
+    const firstText = requests[0].message.parts[0].content.value
+    assert.match(firstText, /agent-nexus-host-instructions/)
+    assert.match(firstText, /Ask for confirmation before irreversible actions\./)
+    assert.match(firstText, /<user-request>\n帮我下单/)
+    assert.equal(requests[1].message.parts[0].content.value, '支付完成')
+})
 
 test('permission requests remain pending after invalid input and accept an option', async () => {
     const sink = createSink()
