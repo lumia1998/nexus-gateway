@@ -11,22 +11,23 @@ Agent，并向 Koishi AgentNexus 或其他客户端提供 HTTP/SSE API。管理�
 
 ## 快速开始
 
-当前仓库代码建议按下面的源码部署流程启动；安装、首次初始化、systemd 和 Agent 准备的完整说明见下文。
+当前稳定版本已发布到 npm，推荐按下面的 npm 流程启动；如果要运行 GitHub 上尚未发布的分支代码，
+再使用下方的源码部署方式。首次初始化、systemd 和 Agent 准备的完整说明见下文。
 
 ```bash
-git clone https://github.com/lumia1998/nexus-gateway.git
-cd nexus-gateway
+NPM_CONFIG_PREFIX="$HOME/.local"
+npm install --global --prefix "$NPM_CONFIG_PREFIX" nexus-agentd@latest
+export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
 mkdir -p "$HOME/.config/agent-nexus" "$HOME/projects"
-npm ci
-npm run build
-node dist/cli.js \
-  --config "$HOME/.config/agent-nexus/nexus-agentd.json" \
-  --host 0.0.0.0 \
-  --port 8787 \
-  --workspace "$HOME/projects"
+nexus-agentd \
+ --config "$HOME/.config/agent-nexus/nexus-agentd.json" \
+ --host 0.0.0.0 \
+ --port 8787 \
+ --workspace "$HOME/projects"
 ```
 
-如果使用 npm 包，请先用 `npm view nexus-agentd version` 确认 registry 中的版本。当前仓库的 package.json 版本不代表该版本已经发布到 npm；未发布时不要把 `npm install nexus-agentd` 当成当前仓库的安装方式。
+当前仓库版本 `0.1.6` 已发布到 npm；可用 `npm view nexus-agentd version` 检查 registry 的 latest，
+也可以将安装命令固定为 `nexus-agentd@0.1.6`。
 
 ## 安装与部署
 
@@ -41,15 +42,15 @@ Gateway 不会替你安装 Agent，也不会替你执行 OpenCode、Claude Code 
 
 ### npm 包安装（已发布版本）
 
-注意：只有当目标版本已经发布到 npm 时才使用此方式。否则请使用下面的源码部署，或将本仓库打包后的 tarball 安装到目标机器。
+`0.1.6` 已发布到 npm。目标版本尚未发布时，请使用下面的源码部署，或将本仓库打包后的 tarball 安装到目标机器。
 
-当前仓库的 package.json 版本可能高于 npm registry 的 latest；发布状态可用 `npm view nexus-agentd version` 检查。
+发布状态可用 `npm view nexus-agentd version` 检查；生产环境需要可复现部署时，建议固定为 `nexus-agentd@0.1.6`。
 
 生产环境建议使用专用的低权限系统用户，并把 npm 全局包安装到用户目录：
 
 ~~~bash
 NPM_CONFIG_PREFIX="$HOME/.local"
-npm install --global --prefix "$NPM_CONFIG_PREFIX" nexus-agentd
+npm install --global --prefix "$NPM_CONFIG_PREFIX" nexus-agentd@0.1.6
 export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
 ~~~
 
@@ -129,7 +130,7 @@ curl http://127.0.0.1:8787/health
 绝对路径加上 `dist/cli.js`，例如：`/usr/bin/node %h/nexus-gateway/dist/cli.js --config
 %h/.config/agent-nexus/nexus-agentd.json`。不要在 systemd 中依赖交互式 Shell 的 nvm 初始化。
 
-### 源码部署（当前仓库推荐）
+### 源码部署（开发分支或未发布版本）
 
 源码部署适合当前仓库和尚未发布到 npm 的版本；生产环境请使用外部进程管理器负责守护，
 不要把运行数据、Artifact 仓库或密钥放进 Git 工作树：
