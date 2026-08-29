@@ -305,6 +305,9 @@ test('API Key Agent scope and session ownership are enforced independently', asy
             (await inventory.json()).agents.map((agent: { id: string }) => agent.id),
             ['agent-a']
         )
+        assert.deepEqual(await json(`${base}/v1/meta`, {
+            Authorization: 'Bearer key-a-secret-value'
+        }), { instanceId: 'test-instance' })
         assert.equal(
             (
                 await fetch(`${base}/v1/sessions`, {
@@ -376,6 +379,62 @@ test('API Key Agent scope and session ownership are enforced independently', asy
             ).status,
             200
         )
+        assert.equal(
+            (
+                await fetch(
+                    `${base}/v1/sessions/${created.id}/artifacts/publish`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            Authorization: 'Bearer key-b-secret-value',
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ path: 'report.md' })
+                    }
+                )
+            ).status,
+            404
+        )
+        const resolved = await fetch(
+            `${base}/v1/sessions/${created.id}/requests/request-1/resolve`,
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer key-a-secret-value',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ optionId: 'allow_once' })
+            }
+        )
+        assert.equal(resolved.status, 202)
+        assert.deepEqual(sessions.resolutions, [{
+            id: created.id,
+            requestId: 'request-1',
+            optionId: 'allow_once'
+        }])
+        const published = await fetch(
+            `${base}/v1/sessions/${created.id}/artifacts/publish`,
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer key-a-secret-value',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ path: 'dist/report.md' })
+            }
+        )
+        assert.equal(published.status, 201)
+        assert.deepEqual(sessions.published, [{ id: created.id, path: 'dist/report.md' }])
+        assert.equal(
+            (
+                await fetch(`${base}/v1/sessions/${created.id}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: 'Bearer key-a-secret-value' }
+                })
+            ).status,
+            200
+        )
+        assert.deepEqual(sessions.closed, [created.id])
 
         sessions.failInventory = true
         const hidden = await fetch(`${base}/v1/agents`, {
@@ -470,7 +529,11 @@ function configuredServerConfig(): AgentdConfig {
 }
 
 class FakeSessions {
+    readonly instanceId = 'test-instance'
     failInventory = false
+    readonly resolutions: Array<Record<string, string>> = []
+    readonly published: Array<Record<string, string>> = []
+    readonly closed: string[] = []
     private readonly sessions = new Map<string, AgentdSessionView & { ownerKeyId: string }>()
 
     async listAgents(ids?: Set<string>) {
@@ -531,6 +594,27 @@ class FakeSessions {
             size: bytes.length
         }
     }
+
+    resolvePending(id: string, response: { requestId: string; optionId?: string }) {
+        this.resolutions.push({
+            id,
+            requestId: response.requestId,
+            optionId: response.optionId || ''
+        })
+        return this.get(id)
+    }
+
+    publishFile(id: string, path: string) {
+        this.published.push({ id, path })
+        return this.get(id)
+    }
+
+    close(id: string) {
+        const session = this.get(id)
+        this.sessions.delete(id)
+        this.closed.push(id)
+        return session
+    }
 }
 
 function login(base: string, password: string) {
@@ -563,8 +647,8 @@ function adminJson(
     })
 }
 
-async function json(url: string) {
-    return (await fetch(url)).json()
+async function json(url: string, headers?: Record<string, string>) {
+    return (await fetch(url, { headers })).json()
 }
 
 function closeServer(server: ReturnType<typeof createAgentdServer>) {

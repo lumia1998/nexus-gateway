@@ -22,7 +22,8 @@ import type {
     AgentdA2AConfig,
     AgentdAgentView,
     AgentdArtifact,
-    AgentdInputAttachment
+    AgentdInputAttachment,
+    AgentdPendingResponse
 } from '../types.js'
 
 export async function probeA2AAgent(
@@ -127,10 +128,22 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         }
     }
 
-    async respondPending(message: string, attachments: AgentdInputAttachment[] = []) {
+    async respondPending(
+        response: AgentdPendingResponse | string,
+        attachments: AgentdInputAttachment[] = []
+    ) {
         if (this.sink.state !== 'input_required') {
             throw new Error('A2A session is not waiting for input')
         }
+        const message =
+            typeof response === 'string'
+                ? response
+                : response.action === 'cancel'
+                  ? 'cancel'
+                  : response.action === 'decline'
+                    ? 'decline'
+                    : response.message ?? response.optionId ?? ''
+        if (!message.trim()) throw new Error('A2A pending response is empty')
         this.sink.clearPending()
         await this.prompt(message, attachments)
     }

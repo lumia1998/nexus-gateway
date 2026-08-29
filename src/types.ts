@@ -187,6 +187,13 @@ export interface AgentdPendingRequest {
     }>
 }
 
+export interface AgentdPendingResponse {
+    requestId: string
+    message?: string
+    optionId?: string
+    action?: 'accept' | 'decline' | 'cancel'
+}
+
 export interface AgentdArtifact {
     id?: string
     name?: string
@@ -202,6 +209,8 @@ export interface AgentdArtifact {
 
 export interface AgentdSessionView {
     id: string
+    /** Identifies the Gateway process that owns this in-memory session. */
+    instanceId?: string
     runId?: string
     protocol: AgentdProtocol
     protocolSessionId?: string

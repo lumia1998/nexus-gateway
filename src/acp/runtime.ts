@@ -10,7 +10,8 @@ import type { AcpSessionSink } from '../session-contract.js'
 import type {
     AgentdArtifact,
     AgentdInputAttachment,
-    AgentdPendingRequest
+    AgentdPendingRequest,
+    AgentdPendingResponse
 } from '../types.js'
 
 interface PendingPermission {
@@ -163,15 +164,54 @@ export class AcpProcessRuntime {
         }
     }
 
-    async respondPending(message: string, _attachments: AgentdInputAttachment[] = []) {
+    async respondPending(
+        input: AgentdPendingResponse | string,
+        _attachments: AgentdInputAttachment[] = []
+    ) {
+        const response =
+            typeof input === 'string'
+                ? {
+                      requestId:
+                          this.pendingInput?.request.id ??
+                          this.pending?.request.id ??
+                          '',
+                      message: input
+                  }
+                : input
         if (this.pendingInput) {
-            this.finishInput(message)
+            if (response.requestId !== this.pendingInput.request.id) {
+                throw new Error(`ACP pending request no longer matches: ${response.requestId}`)
+            }
+            this.finishInput(response.message ?? response.optionId ?? '', response.action)
             return
         }
         const pending = this.pending
         if (!pending) throw new Error('ACP session is not waiting for input')
-        const normalized = message.trim().toLowerCase()
+        if (response.requestId !== pending.request.id) {
+            throw new Error(`ACP pending request no longer matches: ${response.requestId}`)
+        }
         const options = pending.request.options || []
+        if (response.action === 'cancel' || response.action === 'decline') {
+            this.finishPermission({ outcome: { outcome: 'cancelled' } })
+            return
+        }
+        if (response.action === 'accept') {
+            const option =
+                options.find((item) => item.kind?.startsWith('allow')) ||
+                options.find(
+                    (item) => !(item.kind?.startsWith('reject') ?? false)
+                )
+            if (!option) {
+                throw new Error('Permission request does not provide an allow option')
+            }
+            this.finishPermission({
+                outcome: { outcome: 'selected', optionId: option.id }
+            })
+            return
+        }
+        const normalized = (response.optionId ?? response.message ?? '')
+            .trim()
+            .toLowerCase()
         if (
             ['cancel', 'deny', 'reject', '拒绝', '取消', '不同意'].includes(
                 normalized
@@ -336,14 +376,20 @@ export class AcpProcessRuntime {
         })
     }
 
-    private finishInput(message: string) {
+    private finishInput(
+        message: string,
+        requestedAction?: AgentdPendingResponse['action']
+    ) {
         const pending = this.pendingInput
         if (!pending) return
         const normalized = message.trim().toLowerCase()
         let response: acp.CreateElicitationResponse
-        if (['cancel', '取消'].includes(normalized)) {
+        if (requestedAction === 'cancel' || ['cancel', '取消'].includes(normalized)) {
             response = { action: 'cancel' }
-        } else if (['decline', '拒绝', '不同意'].includes(normalized)) {
+        } else if (
+            requestedAction === 'decline' ||
+            ['decline', '拒绝', '不同意'].includes(normalized)
+        ) {
             response = { action: 'decline' }
         } else if (!isFormElicitation(pending.params)) {
             response = { action: 'accept' }

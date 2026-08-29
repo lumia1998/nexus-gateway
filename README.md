@@ -138,6 +138,10 @@ HTTP 上传总上限由 `maxAttachmentBytes` 控制，默认 32 MiB，允许调�
 一起清理。ACP 会优先使用 Agent 声明支持的 image/audio/embeddedContext 能力，否则为 Agent 提供受限的
 `file://` resource link；A2A 则以带文件名和媒体类型的二进制 Part 发送。
 
+ACP Session 还支持显式发布工作区文件。发布接口只接受 realpath 仍位于该 Session 工作区中的普通文件，
+拒绝目录、路径穿越和符号链接逃逸，单个文件最多 12 MiB。响应将文件作为 Session Artifact 返回；不会
+暴露宿主机绝对路径。
+
 API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
 旧 `authToken` 复制到该字段。
 
@@ -182,14 +186,22 @@ POST   /v1/admin/api-keys/:id/regenerate
 Bearer API Key 数据面：
 
 ```text
+GET  /v1/meta
 GET  /v1/agents
 POST /v1/sessions
 GET  /v1/sessions/:id
+DELETE /v1/sessions/:id
 POST /v1/sessions/:id/attachments
 POST /v1/sessions/:id/message
+POST /v1/sessions/:id/requests/:requestId/resolve
+POST /v1/sessions/:id/artifacts/publish
 POST /v1/sessions/:id/cancel
 GET  /v1/sessions/:id/events
 ```
+
+`/v1/meta` 和 Session 响应包含 Gateway `instanceId`，客户端可识别进程重启。授权与输入通过精确的
+`requestId` 解析；过期 ID 返回 `409`，不会误答后续请求。`DELETE /v1/sessions/:id` 会取消活动任务、
+释放 Agent 进程并移除内存 Session。
 
 API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session 操作上都会检查；Session
 还绑定创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。

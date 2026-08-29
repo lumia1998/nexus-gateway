@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { open, realpath } from 'node:fs/promises'
+import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime, probeA2AAgent } from './a2a/runtime.js'
 import type { AgentDriver } from './drivers/index.js'
@@ -18,6 +20,7 @@ import type {
     AgentdInputAttachment,
     AgentdInputAttachmentView,
     AgentdPendingRequest,
+    AgentdPendingResponse,
     AgentdProtocol,
     AgentdRunProgress,
     AgentdSessionState,
@@ -32,6 +35,7 @@ const READINESS_CACHE_MS = 20_000
 const MAX_INPUT_ATTACHMENTS = 16
 const MAX_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
 const MAX_SESSION_INPUT_BYTES = 32 * 1024 * 1024
+const MAX_PUBLISHED_FILE_BYTES = 12 * 1024 * 1024
 
 export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     readonly id = randomUUID()
@@ -56,7 +60,8 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         maxEvents: number,
         private readonly maxOutputChars: number,
         private readonly agentName: string,
-        private readonly runStore?: RunStore
+        private readonly runStore?: RunStore,
+        readonly instanceId: string = randomUUID()
     ) {
         this.events = new SessionEventLog(this.id, maxEvents)
         this.events.append('session_state', { state: this.state, protocol })
@@ -149,6 +154,80 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         })
     }
 
+    async publishFile(filePath: string) {
+        const requestedPath = String(filePath || '').trim()
+        if (!requestedPath) {
+            throw new SessionRequestError(400, 'path is required')
+        }
+        if (!this.workspace) {
+            throw new SessionRequestError(
+                400,
+                'This session does not have a local workspace'
+            )
+        }
+
+        let handle: Awaited<ReturnType<typeof open>> | undefined
+        try {
+            const workspaceRoot = await realpath(this.workspace)
+            const unresolved = resolve(workspaceRoot, requestedPath)
+            const target = await realpath(unresolved)
+            assertWorkspacePath(workspaceRoot, target)
+
+            handle = await open(target, 'r')
+            // Resolve again after opening so a swapped symlink cannot silently
+            // redirect a publish request outside the configured workspace.
+            const verifiedTarget = await realpath(unresolved)
+            assertWorkspacePath(workspaceRoot, verifiedTarget)
+            if (verifiedTarget !== target) {
+                throw new SessionRequestError(
+                    409,
+                    'Published file changed while it was being opened'
+                )
+            }
+
+            const stats = await handle.stat()
+            if (!stats.isFile()) {
+                throw new SessionRequestError(400, 'Only regular files can be published')
+            }
+            if (stats.size > MAX_PUBLISHED_FILE_BYTES) {
+                throw new SessionRequestError(
+                    413,
+                    `Published file exceeds the ${MAX_PUBLISHED_FILE_BYTES} byte limit`
+                )
+            }
+            const bytes = await handle.readFile()
+            const filename = basename(verifiedTarget)
+            const workspacePath = relative(workspaceRoot, verifiedTarget).split(sep).join('/')
+            const artifact: AgentdArtifact = {
+                id: `published:${randomUUID()}`,
+                name: filename,
+                filename,
+                mediaType: mediaTypeForPath(filename),
+                bytesBase64: bytes.toString('base64'),
+                metadata: {
+                    source: 'workspace_publish',
+                    path: workspacePath,
+                    size: bytes.length
+                }
+            }
+            this.addArtifact(artifact)
+            this.emit('artifact', runArtifact(artifact))
+            return artifact
+        } catch (error) {
+            if (error instanceof SessionRequestError) throw error
+            const code = (error as NodeJS.ErrnoException)?.code
+            if (code === 'ENOENT') {
+                throw new SessionRequestError(404, 'Published file was not found')
+            }
+            if (code === 'EACCES' || code === 'EPERM') {
+                throw new SessionRequestError(403, 'Published file cannot be read')
+            }
+            throw error
+        } finally {
+            await handle?.close()
+        }
+    }
+
     setPending(request: AgentdPendingRequest) {
         this.pendingRequest = structuredClone(request)
         this.state = request.kind === 'permission' ? 'permission_required' : 'input_required'
@@ -212,10 +291,13 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         if (!this.runtime) throw new SessionRequestError(409, 'Agent runtime is unavailable')
         const attachments = this.inputAttachmentsFor(attachmentIds)
         if (this.pendingRequest) {
-            this.syncRun({
-                progress: { phase: '继续执行', message: '已提交补充信息' }
-            })
-            await this.runtime.respondPending(message, attachments)
+            await this.resolvePending(
+                {
+                    requestId: this.pendingRequest.id,
+                    message
+                },
+                attachmentIds
+            )
             return
         }
         if (this.state === 'running') {
@@ -241,6 +323,30 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         })
     }
 
+    async resolvePending(
+        response: AgentdPendingResponse,
+        attachmentIds: string[] = []
+    ) {
+        if (!this.runtime) {
+            throw new SessionRequestError(409, 'Agent runtime is unavailable')
+        }
+        const pending = this.pendingRequest
+        if (!pending) {
+            throw new SessionRequestError(409, 'Session is not waiting for input')
+        }
+        if (pending.id !== response.requestId) {
+            throw new SessionRequestError(
+                409,
+                `Pending request no longer matches: ${response.requestId}`
+            )
+        }
+        const attachments = this.inputAttachmentsFor(attachmentIds)
+        this.syncRun({
+            progress: { phase: '继续执行', message: '已提交补充信息' }
+        })
+        await this.runtime.respondPending(response, attachments)
+    }
+
     async cancel() {
         await this.runtime?.cancel()
     }
@@ -253,6 +359,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     snapshot(): AgentdSessionView {
         return {
             id: this.id,
+            instanceId: this.instanceId,
             runId: this.currentRunId,
             protocol: this.protocol,
             protocolSessionId: this.protocolSessionId,
@@ -304,6 +411,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 }
 
 export class SessionManager {
+    readonly instanceId = randomUUID()
     private sessions = new Map<string, ManagedSession>()
     private cleanupTimer?: NodeJS.Timeout
     private readinessCache?: { expiresAt: number; agents: AgentdAgentView[] }
@@ -435,7 +543,8 @@ export class SessionManager {
             this.config.maxEventsPerSession,
             this.config.maxOutputChars,
             config.name || agentId,
-            this.runStore
+            this.runStore,
+            this.instanceId
         )
         const runtime: AgentSessionRuntime =
             config.protocol === 'a2a'
@@ -493,6 +602,16 @@ export class SessionManager {
         return session.snapshot()
     }
 
+    async resolvePending(
+        id: string,
+        response: AgentdPendingResponse,
+        attachmentIds: string[] = []
+    ) {
+        const session = this.require(id)
+        await session.resolvePending(response, attachmentIds)
+        return session.snapshot()
+    }
+
     addInputAttachment(
         id: string,
         name: string,
@@ -503,10 +622,25 @@ export class SessionManager {
         return session.addInputAttachment(name, mediaType, bytes)
     }
 
+    async publishFile(id: string, path: string) {
+        const session = this.require(id)
+        await session.publishFile(path)
+        return session.snapshot()
+    }
+
     async cancel(id: string) {
         const session = this.require(id)
         await session.cancel()
         return session.snapshot()
+    }
+
+    async close(id: string) {
+        const session = this.require(id)
+        if (isActive(session.state)) await session.cancel()
+        const snapshot = session.snapshot()
+        await session.dispose()
+        this.sessions.delete(id)
+        return snapshot
     }
 
     eventsAfter(id: string, after?: string) {
@@ -635,6 +769,46 @@ function runArtifact(artifact: AgentdArtifact) {
         filename: artifact.filename,
         mediaType: artifact.mediaType,
         metadata: artifact.metadata ? structuredClone(artifact.metadata) : undefined
+    }
+}
+
+function assertWorkspacePath(workspaceRoot: string, target: string) {
+    const child = relative(workspaceRoot, target)
+    if (child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+        throw new SessionRequestError(
+            403,
+            'Published files must stay inside the session workspace'
+        )
+    }
+}
+
+function mediaTypeForPath(path: string) {
+    switch (extname(path).toLowerCase()) {
+        case '.txt':
+        case '.log':
+        case '.md':
+            return 'text/plain'
+        case '.json':
+            return 'application/json'
+        case '.pdf':
+            return 'application/pdf'
+        case '.png':
+            return 'image/png'
+        case '.jpg':
+        case '.jpeg':
+            return 'image/jpeg'
+        case '.gif':
+            return 'image/gif'
+        case '.webp':
+            return 'image/webp'
+        case '.svg':
+            return 'image/svg+xml'
+        case '.csv':
+            return 'text/csv'
+        case '.zip':
+            return 'application/zip'
+        default:
+            return 'application/octet-stream'
     }
 }
 

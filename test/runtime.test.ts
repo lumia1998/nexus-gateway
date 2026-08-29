@@ -22,12 +22,42 @@ test('permission requests remain pending after invalid input and accept an optio
     assert.equal(sink.state, 'permission_required')
     assert.equal(sink.pendingRequest?.id, (runtime as any).pending.request.id)
 
-    await runtime.respondPending('1')
+    await assert.rejects(
+        () =>
+            runtime.respondPending({
+                requestId: 'stale-request',
+                optionId: 'allow'
+            }),
+        /no longer matches/
+    )
+    assert.equal(sink.state, 'permission_required')
+
+    await runtime.respondPending({
+        requestId: sink.pendingRequest.id,
+        optionId: 'allow'
+    })
     assert.deepEqual(await response, {
         outcome: { outcome: 'selected', optionId: 'allow' }
     })
     assert.equal(sink.state, 'running')
     assert.equal(sink.pendingRequest, undefined)
+
+    const acceptSink = createSink()
+    const acceptRuntime = new AcpProcessRuntime(driver(), acceptSink as any)
+    const accepted = (acceptRuntime as any).requestPermission({
+        toolCall: { toolCallId: 'tool-2', title: 'Run tests' },
+        options: [
+            { optionId: 'deny', name: 'Reject', kind: 'reject_once' },
+            { optionId: 'allow', name: 'Allow once', kind: 'allow_once' }
+        ]
+    })
+    await acceptRuntime.respondPending({
+        requestId: acceptSink.pendingRequest.id,
+        action: 'accept'
+    })
+    assert.deepEqual(await accepted, {
+        outcome: { outcome: 'selected', optionId: 'allow' }
+    })
 })
 
 test('a canceled prompt cannot overwrite the terminal canceled state', async () => {

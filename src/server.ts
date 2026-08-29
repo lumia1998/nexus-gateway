@@ -21,6 +21,7 @@ import type {
     AgentdConfig,
     AgentdDriverKind,
     AgentdEvent,
+    AgentdPendingResponse,
     AgentdProtocol,
     PermissionPolicy
 } from './types.js'
@@ -213,6 +214,10 @@ async function handleRequest(context: RequestContext) {
     }
 
     const principal = authenticateApiKey(request, config, controlPlane, apiLimiter)
+    if (url.pathname === '/v1/meta' && request.method === 'GET') {
+        writeJson(response, 200, { instanceId: sessions.instanceId })
+        return
+    }
     if (url.pathname === '/v1/agents' && request.method === 'GET') {
         const ids = principal.scope.allAgents
             ? undefined
@@ -261,6 +266,69 @@ async function handleRequest(context: RequestContext) {
         return
     }
 
+    const resolveMatch = url.pathname.match(
+        /^\/v1\/sessions\/([^/]+)\/requests\/([^/]+)\/resolve$/
+    )
+    if (resolveMatch && request.method === 'POST') {
+        const sessionId = decodeURIComponent(resolveMatch[1])
+        const requestId = decodeURIComponent(resolveMatch[2])
+        const session = sessions.get(sessionId)
+        if (!sessions.owns(sessionId, principal.id)) {
+            throw new RequestError(404, 'Session not found')
+        }
+        assertAgentScope(principal, session.agentId)
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['message', 'optionId', 'action', 'attachments'])
+        const resolution: AgentdPendingResponse = {
+            requestId,
+            message: optionalString(body.message),
+            optionId: optionalString(body.optionId),
+            action: optionalPendingAction(body.action)
+        }
+        if (
+            !resolution.message &&
+            !resolution.optionId &&
+            !resolution.action
+        ) {
+            throw new RequestError(400, 'A pending response is required')
+        }
+        writeJson(
+            response,
+            202,
+            await sessions.resolvePending(
+                sessionId,
+                resolution,
+                optionalAttachmentIds(body.attachments)
+            )
+        )
+        return
+    }
+
+    const publishMatch = url.pathname.match(
+        /^\/v1\/sessions\/([^/]+)\/artifacts\/publish$/
+    )
+    if (publishMatch && request.method === 'POST') {
+        const sessionId = decodeURIComponent(publishMatch[1])
+        const session = sessions.get(sessionId)
+        if (!sessions.owns(sessionId, principal.id)) {
+            throw new RequestError(404, 'Session not found')
+        }
+        assertAgentScope(principal, session.agentId)
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['path'])
+        writeJson(
+            response,
+            201,
+            await sessions.publishFile(
+                sessionId,
+                requiredString(body.path, 'path')
+            )
+        )
+        return
+    }
+
     const match = url.pathname.match(
         /^\/v1\/sessions\/([^/]+)(?:\/(message|cancel|events))?$/
     )
@@ -275,6 +343,10 @@ async function handleRequest(context: RequestContext) {
 
     if (!action && request.method === 'GET') {
         writeJson(response, 200, session)
+        return
+    }
+    if (!action && request.method === 'DELETE') {
+        writeJson(response, 200, await sessions.close(sessionId))
         return
     }
     if (action === 'message' && request.method === 'POST') {
@@ -799,6 +871,19 @@ function optionalString(value: unknown) {
     if (value === undefined || value === null) return undefined
     if (typeof value !== 'string') throw new RequestError(400, 'Expected a string')
     return value.trim() || undefined
+}
+
+function optionalPendingAction(
+    value: unknown
+): AgentdPendingResponse['action'] | undefined {
+    if (value === undefined || value === null || value === '') return undefined
+    if (value === 'accept' || value === 'decline' || value === 'cancel') {
+        return value
+    }
+    throw new RequestError(
+        400,
+        'action must be accept, decline, or cancel'
+    )
 }
 
 function optionalBoolean(value: unknown, name: string) {
