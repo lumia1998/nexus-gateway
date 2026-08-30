@@ -80,6 +80,46 @@ test('a canceled prompt cannot overwrite the terminal canceled state', async () 
     assert.equal(sink.states.includes('completed'), false)
 })
 
+test('only ACP end_turn creates a verified completion proof', async () => {
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(driver(), sink as any)
+    ;(runtime as any).connection = {
+        agent: {
+            async request() {
+                sink.appendOutput('Work completed.')
+                return { stopReason: 'end_turn' }
+            }
+        }
+    }
+
+    await runtime.prompt('Work')
+    assert.equal(sink.state, 'completed')
+    assert.deepEqual(sink.completion, {
+        source: 'acp_prompt_response',
+        stopReason: 'end_turn'
+    })
+})
+
+test('ACP token and turn limits are incomplete rather than successful', async () => {
+    for (const stopReason of ['max_tokens', 'max_turn_requests']) {
+        const sink = createSink()
+        const runtime = new AcpProcessRuntime(driver(), sink as any)
+        ;(runtime as any).connection = {
+            agent: {
+                async request() {
+                    sink.appendOutput('Partial output')
+                    return { stopReason }
+                }
+            }
+        }
+
+        await runtime.prompt('Work')
+        assert.equal(sink.state, 'failed')
+        assert.match(sink.error || '', new RegExp(stopReason))
+        assert.equal(sink.completion, undefined)
+    }
+})
+
 test('cancel remains terminal when the ACP notification fails', async () => {
     const sink = createSink()
     sink.state = 'running'
@@ -199,10 +239,13 @@ test('maps supported ACP image input to an inline prompt block', async () => {
             bytes: Buffer.from([0, 255, 1])
         }
     ])
-    assert.deepEqual(blocks, [
-        { type: 'text', text: '看这张图' },
-        { type: 'image', data: Buffer.from([0, 255, 1]).toString('base64'), mimeType: 'image/png' }
-    ])
+    assert.deepEqual(blocks[0], { type: 'text', text: '看这张图' })
+    assert.match(String((blocks[1] as any).text), /agent_nexus_completion_contract/)
+    assert.deepEqual(blocks[2], {
+        type: 'image',
+        data: Buffer.from([0, 255, 1]).toString('base64'),
+        mimeType: 'image/png'
+    })
 })
 
 function driver() {
@@ -228,17 +271,28 @@ function createSink() {
         state: 'created' as string,
         acpSessionId: 'acp-1',
         pendingRequest: undefined as any,
+        completion: undefined as any,
+        output: '',
+        error: undefined as string | undefined,
         states: [] as string[],
         events: [] as Array<{ type: string; data: any }>,
         artifacts: [] as any[],
         setAcpSessionId(id: string) {
             this.acpSessionId = id
         },
-        setState(state: string) {
+        setState(state: string, error?: string) {
             this.state = state
+            this.error = error
             this.states.push(state)
         },
-        appendOutput() {},
+        completeTurn(proof: any) {
+            this.completion = structuredClone(proof)
+            this.setState('completed')
+            return true
+        },
+        appendOutput(text: string) {
+            this.output += text
+        },
         addArtifact(artifact: any) {
             this.artifacts.push(structuredClone(artifact))
         },

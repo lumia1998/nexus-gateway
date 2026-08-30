@@ -10,6 +10,25 @@ export type AgentdSessionState =
 export type AgentdProtocol = 'acp' | 'a2a'
 export type PermissionPolicy = 'ask' | 'deny'
 
+export type AgentdTurnCompletionSource =
+    | 'acp_prompt_response'
+    | 'a2a_task_status'
+    | 'a2a_message_stream'
+
+export interface AgentdTurnCompletionProof {
+    source: AgentdTurnCompletionSource
+    stopReason: string
+}
+
+export interface AgentdTurnCompletion extends AgentdTurnCompletionProof {
+    runId?: string
+    protocol: AgentdProtocol
+    verified: true
+    outputPresent: boolean
+    artifactCount: number
+    completedAt: number
+}
+
 export const agentdDriverKinds = [
     'opencode',
     'claude',
@@ -224,6 +243,8 @@ export interface AgentdSessionView {
     artifacts: AgentdArtifact[]
     inputAttachments?: AgentdInputAttachmentView[]
     pendingRequest?: AgentdPendingRequest
+    /** Structural proof that the current protocol turn reached a valid terminal boundary. */
+    completion?: AgentdTurnCompletion
     lastEventId?: string
     createdAt: number
     updatedAt: number
@@ -261,6 +282,7 @@ export interface AgentdRunView {
     error?: string
     artifactCount: number
     inputAttachmentCount?: number
+    completion?: AgentdTurnCompletion
     startedAt: number
     updatedAt: number
     endedAt?: number

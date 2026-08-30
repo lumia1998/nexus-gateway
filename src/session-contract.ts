@@ -4,7 +4,8 @@ import type {
     AgentdInputAttachment,
     AgentdPendingRequest,
     AgentdPendingResponse,
-    AgentdSessionState
+    AgentdSessionState,
+    AgentdTurnCompletionProof
 } from './types.js'
 
 export interface AgentSessionSink {
@@ -13,6 +14,7 @@ export interface AgentSessionSink {
     readonly protocolSessionId?: string
     setProtocolSessionId(id: string): void
     setState(state: AgentdSessionState, error?: string): void
+    completeTurn(proof: AgentdTurnCompletionProof): boolean
     appendOutput(text: string): void
     addArtifact(artifact: AgentdArtifact): void
     setPending(request: AgentdPendingRequest): void

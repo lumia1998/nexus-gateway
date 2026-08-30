@@ -24,7 +24,9 @@ import type {
     AgentdProtocol,
     AgentdRunProgress,
     AgentdSessionState,
-    AgentdSessionView
+    AgentdSessionView,
+    AgentdTurnCompletion,
+    AgentdTurnCompletionProof
 } from './types.js'
 import type { WorkspacePolicy } from './workspace.js'
 
@@ -48,6 +50,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     output = ''
     error?: string
     pendingRequest?: AgentdPendingRequest
+    private completion?: AgentdTurnCompletion
     private artifacts: AgentdArtifact[] = []
     private inputAttachments = new Map<string, AgentdInputAttachment>()
     private runtime?: AgentSessionRuntime
@@ -84,6 +87,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 
     setState(state: AgentdSessionState, error?: string) {
         if (this.state === state && this.error === error) return
+        if (state !== 'completed') this.completion = undefined
         this.state = state
         this.error = error
         this.updatedAt = Date.now()
@@ -95,14 +99,57 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
                   : state === 'canceled'
                     ? 'canceled'
                     : 'session_state'
-        this.events.append(type, { state, ...(error ? { error } : {}) })
+        this.events.append(type, {
+            state,
+            ...(error ? { error } : {}),
+            ...(state === 'completed' && this.completion
+                ? { completion: structuredClone(this.completion) }
+                : {})
+        })
         const endedAt = isTerminal(state) ? this.updatedAt : undefined
         this.syncRun({
             state,
             error,
             progress: progressForState(state, error),
+            completion:
+                state === 'completed' && this.completion
+                    ? structuredClone(this.completion)
+                    : undefined,
             ...(endedAt ? { endedAt } : {})
         })
+    }
+
+    completeTurn(proof: AgentdTurnCompletionProof) {
+        if (this.pendingRequest || isInteractive(this.state)) {
+            this.emit('terminal_output', {
+                stream: 'system',
+                text: `Ignored ${proof.source} completion while the session is waiting for ${this.pendingRequest?.kind || 'input'}.`
+            })
+            return false
+        }
+        if (this.state !== 'running') return false
+
+        const outputPresent = this.output.trim().length > 0
+        const artifactCount = this.artifacts.length
+        if (!outputPresent && artifactCount < 1) {
+            this.setState(
+                'failed',
+                `Agent ended the turn (${proof.stopReason}) without a final response or artifact.`
+            )
+            return false
+        }
+
+        this.completion = {
+            ...structuredClone(proof),
+            runId: this.currentRunId,
+            protocol: this.protocol,
+            verified: true,
+            outputPresent,
+            artifactCount,
+            completedAt: Date.now()
+        }
+        this.setState('completed')
+        return true
     }
 
     appendOutput(text: string) {
@@ -229,6 +276,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     }
 
     setPending(request: AgentdPendingRequest) {
+        this.completion = undefined
         this.pendingRequest = structuredClone(request)
         this.state = request.kind === 'permission' ? 'permission_required' : 'input_required'
         this.updatedAt = Date.now()
@@ -305,6 +353,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         }
         this.output = ''
         this.artifacts = []
+        this.completion = undefined
         this.error = undefined
         this.updatedAt = Date.now()
         this.currentRunId = this.runStore?.create({
@@ -374,6 +423,9 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             pendingRequest: this.pendingRequest
                 ? structuredClone(this.pendingRequest)
                 : undefined,
+            completion: this.completion
+                ? structuredClone(this.completion)
+                : undefined,
             lastEventId: this.events.lastId,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt
@@ -395,6 +447,9 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             output: this.output || undefined,
             artifacts: this.artifacts.map(runArtifact),
             artifactCount: this.artifacts.length,
+            completion: this.completion
+                ? structuredClone(this.completion)
+                : undefined,
             updatedAt: this.updatedAt,
             ...patch
         })
@@ -867,6 +922,10 @@ function isTerminal(state: AgentdSessionState) {
 
 function isActive(state: AgentdSessionState) {
     return state === 'running' || state === 'input_required' || state === 'permission_required'
+}
+
+function isInteractive(state: AgentdSessionState) {
+    return state === 'input_required' || state === 'permission_required'
 }
 
 function errorMessage(error: unknown) {

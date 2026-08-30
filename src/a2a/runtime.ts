@@ -23,8 +23,10 @@ import type {
     AgentdAgentView,
     AgentdArtifact,
     AgentdInputAttachment,
-    AgentdPendingResponse
+    AgentdPendingResponse,
+    AgentdTurnCompletionProof
 } from '../types.js'
+import { TURN_COMPLETION_CONTRACT } from '../completion-contract.js'
 
 export async function probeA2AAgent(
     id: string,
@@ -71,6 +73,9 @@ export class A2AClientRuntime implements AgentSessionRuntime {
     private activeController?: AbortController
     private readonly artifactCache = new Map<string, AgentdArtifact>()
     private readonly emittedMessages = new Set<string>()
+    private sawTaskStatus = false
+    private sawAgentMessage = false
+    private completionProof?: AgentdTurnCompletionProof
 
     constructor(
         private readonly config: AgentdA2AConfig,
@@ -100,6 +105,9 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         if (this.prompting) throw new Error('A2A session is already processing a message')
         if (this.disposed) throw new Error('A2A runtime is disposed')
         this.prompting = true
+        this.sawTaskStatus = false
+        this.sawAgentMessage = false
+        this.completionProof = undefined
         this.sink.clearPending()
         this.sink.setState('running')
         const controller = new AbortController()
@@ -116,7 +124,23 @@ export class A2AClientRuntime implements AgentSessionRuntime {
             })) {
                 this.processResponse(response)
             }
-            if (this.sink.state === 'running') this.sink.setState('completed')
+            if (this.sink.state === 'running') {
+                if (this.completionProof) {
+                    this.sink.completeTurn(this.completionProof)
+                } else if (!this.sawTaskStatus && this.sawAgentMessage) {
+                    this.sink.completeTurn({
+                        source: 'a2a_message_stream',
+                        stopReason: 'message_stream_end'
+                    })
+                } else {
+                    this.sink.setState(
+                        'failed',
+                        this.sawTaskStatus
+                            ? 'A2A stream ended without a terminal task status.'
+                            : 'A2A stream ended without an agent result.'
+                    )
+                }
+            }
         } catch (error) {
             if (this.sink.state !== 'canceled') {
                 this.sink.setState('failed', abortMessage(error, controller.signal))
@@ -191,6 +215,12 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                         filename: '',
                         mediaType: 'text/plain'
                     },
+                    {
+                        content: { $case: 'text', value: TURN_COMPLETION_CONTRACT },
+                        metadata: undefined,
+                        filename: '',
+                        mediaType: 'text/plain'
+                    },
                     ...attachments.map((attachment): Part => ({
                         content: {
                             $case: 'raw',
@@ -249,6 +279,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
 
     private processMessage(message: Message | undefined) {
         if (!message || message.role !== Role.ROLE_AGENT) return
+        this.sawAgentMessage = true
         this.captureIds(message.taskId, message.contextId)
         if (message.messageId && this.emittedMessages.has(message.messageId)) return
         if (message.messageId) this.emittedMessages.add(message.messageId)
@@ -259,10 +290,20 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                 content: { type: 'text', text }
             })
         }
+        message.parts.forEach((part, index) => {
+            const artifact = artifactFromPart(
+                part,
+                `message:${message.messageId || 'agent'}:${index}`
+            )
+            if (!artifact) return
+            this.sink.addArtifact(artifact)
+            this.sink.emit('artifact', artifact)
+        })
     }
 
     private processStatus(status: TaskStatus | undefined) {
         if (!status) return
+        this.sawTaskStatus = true
         this.processMessage(status.message)
         const statusText = textParts(status.message?.parts || []).join('\n').trim()
         switch (status.state) {
@@ -272,7 +313,10 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                 break
             case TaskState.TASK_STATE_COMPLETED:
                 this.sink.clearPending()
-                this.sink.setState('completed')
+                this.completionProof = {
+                    source: 'a2a_task_status',
+                    stopReason: 'completed'
+                }
                 break
             case TaskState.TASK_STATE_CANCELED:
                 this.sink.clearPending()
@@ -395,6 +439,37 @@ function artifactFromA2A(artifact: Artifact): AgentdArtifact {
         mediaType: artifact.parts.find((part) => part.mediaType)?.mediaType || undefined,
         data: dataParts.length ? dataParts : undefined,
         metadata: artifact.metadata || undefined
+    }
+}
+
+function artifactFromPart(part: Part, id: string): AgentdArtifact | undefined {
+    switch (part.content?.$case) {
+        case 'raw':
+            return {
+                id,
+                name: part.filename || id,
+                filename: part.filename || undefined,
+                mediaType: part.mediaType || undefined,
+                bytesBase64: Buffer.from(part.content.value).toString('base64')
+            }
+        case 'url':
+            return {
+                id,
+                name: part.filename || part.content.value || id,
+                filename: part.filename || undefined,
+                mediaType: part.mediaType || undefined,
+                url: part.content.value || undefined
+            }
+        case 'data':
+            return {
+                id,
+                name: part.filename || id,
+                filename: part.filename || undefined,
+                mediaType: part.mediaType || undefined,
+                data: part.content.value
+            }
+        default:
+            return undefined
     }
 }
 

@@ -13,6 +13,7 @@ import type {
     AgentdPendingRequest,
     AgentdPendingResponse
 } from '../types.js'
+import { TURN_COMPLETION_CONTRACT } from '../completion-contract.js'
 
 interface PendingPermission {
     request: AgentdPendingRequest
@@ -103,7 +104,7 @@ export class AcpProcessRuntime {
                 },
                 clientInfo: {
                     name: 'nexus-agentd',
-                    version: '0.1.4'
+                    version: '0.2.0'
                 }
             }
         )
@@ -144,12 +145,24 @@ export class AcpProcessRuntime {
             if (this.sink.state === 'canceled' || this.sink.state === 'failed') {
                 return
             }
-            if (response.stopReason === 'cancelled') {
-                this.sink.setState('canceled')
-            } else if (response.stopReason === 'refusal') {
-                this.sink.setState('failed', 'ACP agent refused the prompt')
-            } else {
-                this.sink.setState('completed')
+            switch (response.stopReason) {
+                case 'end_turn':
+                    this.sink.completeTurn({
+                        source: 'acp_prompt_response',
+                        stopReason: response.stopReason
+                    })
+                    break
+                case 'cancelled':
+                    this.sink.setState('canceled')
+                    break
+                case 'refusal':
+                    this.sink.setState('failed', 'ACP agent refused the prompt')
+                    break
+                default:
+                    this.sink.setState(
+                        'failed',
+                        `ACP turn stopped before completion: ${response.stopReason}`
+                    )
             }
         } catch (error) {
             if (this.sink.state !== 'canceled') {
@@ -543,7 +556,10 @@ export class AcpProcessRuntime {
     }
 
     private async promptBlocks(message: string, attachments: AgentdInputAttachment[]) {
-        const blocks: acp.ContentBlock[] = [{ type: 'text', text: message }]
+        const blocks: acp.ContentBlock[] = [
+            { type: 'text', text: message },
+            { type: 'text', text: TURN_COMPLETION_CONTRACT }
+        ]
         for (const attachment of attachments) {
             const mediaType = attachment.mediaType || 'application/octet-stream'
             const data = attachment.bytes.toString('base64')

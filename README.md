@@ -64,6 +64,19 @@ Workspace 配置保持不变。
 
 ## Agent 协议
 
+每个任务都会附带协议级完成约束：Agent 在结束 turn 前必须处理完工作，等待用户输入或授权时必须使用
+协议请求，并提供非空最终说明或 Artifact。Gateway 只接受以下完成证明：
+
+- ACP `session/prompt` 返回 `stopReason=end_turn`；`max_tokens`、`max_turn_requests`、拒绝和取消不会被
+  误报为成功。
+- A2A Task 明确进入 `COMPLETED`；如果远端直接返回 Message 而没有创建 Task，则以完整消息流结束作为
+  turn 边界。已经出现 Task 状态但没有终态的流会标记失败。
+- Session 仍有待处理的 permission/input 请求，或者最终文本与 Artifact 都为空时，不允许进入
+  `completed`。
+
+成功的 Session 响应包含 `completion`，其中记录当前 Run ID、协议、完成来源、stop reason、最终文本和
+产物存在性以及完成时间。这个证明验证的是协议边界和结果存在性，不替代业务内容本身的语义验收。
+
 ### ACP
 
 | Driver | 默认入口 |
@@ -199,7 +212,8 @@ POST /v1/sessions/:id/cancel
 GET  /v1/sessions/:id/events
 ```
 
-`/v1/meta` 和 Session 响应包含 Gateway `instanceId`，客户端可识别进程重启。授权与输入通过精确的
+`/v1/meta` 和 Session 响应包含 Gateway `instanceId`；完成的 Session 还包含与当前 Run 绑定的
+`completion` 证明，客户端可识别进程重启和迟到/伪造的完成状态。授权与输入通过精确的
 `requestId` 解析；过期 ID 返回 `409`，不会误答后续请求。`DELETE /v1/sessions/:id` 会取消活动任务、
 释放 Agent 进程并移除内存 Session。
 

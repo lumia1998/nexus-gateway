@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
+import { Role, TaskState } from '@a2a-js/sdk'
 import { A2AClientRuntime, probeA2AAgent } from '../src/a2a/runtime.js'
 
 test('A2A readiness discovers a v1 Agent Card through authenticated fetch', async () => {
@@ -104,11 +105,122 @@ test('A2A requests carry input files as raw Parts with filename and media type',
         }
     ])
     assert.equal(request.message.parts[0].content.$case, 'text')
-    assert.equal(request.message.parts[1].content.$case, 'raw')
+    assert.match(
+        request.message.parts[1].content.value,
+        /agent_nexus_completion_contract/
+    )
+    assert.equal(request.message.parts[2].content.$case, 'raw')
     assert.deepEqual(
-        [...request.message.parts[1].content.value],
+        [...request.message.parts[2].content.value],
         [0, 255, 1]
     )
-    assert.equal(request.message.parts[1].filename, '需求.pdf')
-    assert.equal(request.message.parts[1].mediaType, 'application/pdf')
+    assert.equal(request.message.parts[2].filename, '需求.pdf')
+    assert.equal(request.message.parts[2].mediaType, 'application/pdf')
 })
+
+test('A2A message-only streams finish with proof, but task streams require a terminal status', async () => {
+    const messageSink = createSink()
+    const messageRuntime = runtimeWithResponses(messageSink, [
+        {
+            payload: {
+                $case: 'message',
+                value: {
+                    messageId: 'message-1',
+                    role: Role.ROLE_AGENT,
+                    parts: [textPart('Finished and verified.')]
+                }
+            }
+        }
+    ])
+    await messageRuntime.prompt('Work')
+    assert.equal(messageSink.state, 'completed')
+    assert.equal(messageSink.completion?.source, 'a2a_message_stream')
+
+    const taskSink = createSink()
+    const taskRuntime = runtimeWithResponses(taskSink, [
+        {
+            payload: {
+                $case: 'statusUpdate',
+                value: {
+                    taskId: 'task-1',
+                    contextId: 'context-1',
+                    status: { state: TaskState.TASK_STATE_WORKING }
+                }
+            }
+        }
+    ])
+    await taskRuntime.prompt('Work')
+    assert.equal(taskSink.state, 'failed')
+    assert.match(taskSink.error || '', /without a terminal task status/)
+    assert.equal(taskSink.completion, undefined)
+})
+
+function runtimeWithResponses(sink: ReturnType<typeof createSink>, responses: any[]) {
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: 'http://127.0.0.1/agent-card.json',
+            timeoutMs: 60_000
+        },
+        sink as any,
+        60_000
+    )
+    ;(runtime as any).card = { defaultOutputModes: ['text/plain'] }
+    ;(runtime as any).client = {
+        async *sendMessageStream() {
+            for (const response of responses) yield response
+        }
+    }
+    return runtime
+}
+
+function createSink() {
+    return {
+        id: 'session-1',
+        state: 'created',
+        protocolSessionId: undefined as string | undefined,
+        output: '',
+        artifacts: [] as any[],
+        completion: undefined as any,
+        error: undefined as string | undefined,
+        setProtocolSessionId(id: string) {
+            this.protocolSessionId = id
+        },
+        setState(state: string, error?: string) {
+            this.state = state
+            this.error = error
+            if (state !== 'completed') this.completion = undefined
+        },
+        completeTurn(proof: any) {
+            if (!this.output.trim() && this.artifacts.length < 1) {
+                this.setState('failed', 'missing result')
+                return false
+            }
+            this.completion = structuredClone(proof)
+            this.state = 'completed'
+            return true
+        },
+        appendOutput(text: string) {
+            this.output += text
+        },
+        addArtifact(artifact: any) {
+            this.artifacts.push(structuredClone(artifact))
+        },
+        setPending(request: any) {
+            this.state = request.kind === 'permission'
+                ? 'permission_required'
+                : 'input_required'
+        },
+        clearPending() {},
+        emit() {}
+    }
+}
+
+function textPart(value: string) {
+    return {
+        content: { $case: 'text', value },
+        metadata: undefined,
+        filename: '',
+        mediaType: 'text/plain'
+    }
+}

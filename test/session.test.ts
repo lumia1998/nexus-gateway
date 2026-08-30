@@ -59,6 +59,56 @@ test('rejects workspace symlink escapes', { skip: process.platform === 'win32' }
     }
 })
 
+test('accepts completion only with a protocol proof and a final result', () => {
+    const session = managedSession(process.cwd())
+    session.setState('running')
+    session.appendOutput('Finished and verified.')
+
+    assert.equal(
+        session.completeTurn({
+            source: 'acp_prompt_response',
+            stopReason: 'end_turn'
+        }),
+        true
+    )
+    const snapshot = session.snapshot()
+    assert.equal(snapshot.state, 'completed')
+    assert.equal(snapshot.completion?.verified, true)
+    assert.equal(snapshot.completion?.outputPresent, true)
+    assert.equal(snapshot.completion?.artifactCount, 0)
+})
+
+test('rejects silent completion and never completes over pending input', () => {
+    const silent = managedSession(process.cwd())
+    silent.setState('running')
+    assert.equal(
+        silent.completeTurn({
+            source: 'acp_prompt_response',
+            stopReason: 'end_turn'
+        }),
+        false
+    )
+    assert.equal(silent.state, 'failed')
+    assert.match(silent.error || '', /without a final response or artifact/)
+
+    const pending = managedSession(process.cwd())
+    pending.setState('running')
+    pending.setPending({
+        id: 'request-1',
+        kind: 'input',
+        prompt: 'Need a value'
+    })
+    assert.equal(
+        pending.completeTurn({
+            source: 'acp_prompt_response',
+            stopReason: 'end_turn'
+        }),
+        false
+    )
+    assert.equal(pending.state, 'input_required')
+    assert.equal(pending.snapshot().pendingRequest?.id, 'request-1')
+})
+
 function managedSession(workspace: string) {
     return new ManagedSession(
         'opencode',

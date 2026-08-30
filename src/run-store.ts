@@ -153,6 +153,7 @@ export class RunStore {
                 | 'endedAt'
                 | 'durationMs'
                 | 'inputAttachmentCount'
+                | 'completion'
             >
         >
     ) {
