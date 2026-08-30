@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -7,6 +8,7 @@ import test from 'node:test'
 import { loadAgentdConfig } from '../src/config.js'
 import { AgentdControlPlane } from '../src/control-plane.js'
 import { createDriverRegistry } from '../src/drivers/index.js'
+import { closeServer as closeAgentdServer } from '../src/index.js'
 import { createAgentdServer } from '../src/server.js'
 import { RunStore, runStorePathForConfig } from '../src/run-store.js'
 import { SessionManager } from '../src/session.js'
@@ -43,6 +45,25 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
     } finally {
         await fixture.close()
     }
+})
+
+test('bounded shutdown closes long-lived HTTP connections', async () => {
+    const server = http.createServer((_request, response) => {
+        response.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            Connection: 'keep-alive'
+        })
+        response.flushHeaders()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    const response = await fetch(`http://127.0.0.1:${port}/events`)
+    assert.equal(response.status, 200)
+
+    const startedAt = Date.now()
+    await closeAgentdServer(server, 50)
+    assert.ok(Date.now() - startedAt < 1_000)
+    await response.body?.cancel().catch(() => undefined)
 })
 
 test('Console Cookie and client API Keys are separate, with upgrade-safe bootstrap and password revocation', async () => {
@@ -445,7 +466,7 @@ test('API Key Agent scope and session ownership are enforced independently', asy
         assert.equal(failure.error, 'Internal server error')
         assert.equal(typeof failure.requestId, 'string')
     } finally {
-        await closeServer(server)
+        await closeAgentdServer(server)
     }
 })
 
@@ -484,8 +505,8 @@ async function startFreshServer(host: string) {
         server,
         base: `http://127.0.0.1:${port}`,
         async close() {
-            await closeServer(server)
             await sessions.shutdown()
+            await closeAgentdServer(server)
             await runStore.flush()
             await rm(directory, { recursive: true, force: true })
         }
@@ -649,11 +670,4 @@ function adminJson(
 
 async function json(url: string, headers?: Record<string, string>) {
     return (await fetch(url, { headers })).json()
-}
-
-function closeServer(server: ReturnType<typeof createAgentdServer>) {
-    return new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
-        server.closeIdleConnections?.()
-    })
 }

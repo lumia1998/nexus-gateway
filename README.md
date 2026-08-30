@@ -215,7 +215,8 @@ GET  /v1/sessions/:id/events
 `/v1/meta` 和 Session 响应包含 Gateway `instanceId`；完成的 Session 还包含与当前 Run 绑定的
 `completion` 证明，客户端可识别进程重启和迟到/伪造的完成状态。授权与输入通过精确的
 `requestId` 解析；过期 ID 返回 `409`，不会误答后续请求。`DELETE /v1/sessions/:id` 会取消活动任务、
-释放 Agent 进程并移除内存 Session。
+释放 Agent 整个进程组并移除内存 Session。Gateway 停止时会先终止 Session，再在有限宽限期后关闭残留
+HTTP/SSE 连接，避免长连接或 Agent 孙进程阻塞服务重启。
 
 API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session 操作上都会检查；Session
 还绑定创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。

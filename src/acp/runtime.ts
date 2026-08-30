@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as acp from '@agentclientprotocol/sdk'
 import type { AgentDriver } from '../drivers/index.js'
+import { terminateProcessTree } from '../process-tree.js'
 import type { AcpSessionSink } from '../session-contract.js'
 import type {
     AgentdArtifact,
@@ -104,7 +105,7 @@ export class AcpProcessRuntime {
                 },
                 clientInfo: {
                     name: 'nexus-agentd',
-                    version: '0.2.0'
+                    version: '0.2.1'
                 }
             }
         )
@@ -296,14 +297,16 @@ export class AcpProcessRuntime {
         }
         this.connection?.close()
         this.connection = undefined
+        const child = this.process
+        this.process = undefined
+        if (child) {
+            await terminateProcessTree(child, {
+                ownsProcessGroup: this.driver.ownsProcessGroup
+            })
+        }
         if (this.inputDirectory) {
             await rm(this.inputDirectory, { recursive: true, force: true }).catch(() => undefined)
             this.inputDirectory = undefined
-        }
-        const child = this.process
-        this.process = undefined
-        if (child && child.exitCode === null && child.signalCode === null) {
-            child.kill()
         }
     }
 

@@ -35,8 +35,7 @@ export async function startAgentd(configPath: string) {
         runStore,
         controlPlane,
         async close() {
-            await closeServer(server)
-            await sessions.shutdown()
+            await Promise.all([closeServer(server), sessions.shutdown()])
             await runStore.flush()
         }
     }
@@ -58,9 +57,21 @@ function listen(server: Server, port: number, host: string) {
     })
 }
 
-function closeServer(server: Server) {
+export function closeServer(server: Server, graceMs = 2_000) {
     return new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
+        let settled = false
+        const finish = (error?: Error) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            if (error) reject(error)
+            else resolve()
+        }
+        const timer = setTimeout(() => {
+            server.closeAllConnections?.()
+            finish()
+        }, Math.max(0, graceMs))
+        server.close((error) => finish(error || undefined))
         server.closeIdleConnections?.()
     })
 }

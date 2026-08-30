@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { AcpProcessRuntime } from '../src/acp/runtime.js'
+import { terminateProcessTree } from '../src/process-tree.js'
 
 test('permission requests remain pending after invalid input and accept an option', async () => {
     const sink = createSink()
@@ -139,6 +141,25 @@ test('cancel remains terminal when the ACP notification fails', async () => {
     assert.equal(sink.state, 'canceled')
     assert.equal(closed, true)
     assert.match(String(sink.events[0]?.data?.text), /connection closed/)
+})
+
+test('Agent process disposal is bounded and reaches a terminal child process', async () => {
+    const child = spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => undefined, 1000)'],
+        {
+            detached: process.platform !== 'win32',
+            stdio: 'ignore'
+        }
+    )
+    assert.ok(child.pid)
+
+    await terminateProcessTree(child, {
+        ownsProcessGroup: process.platform !== 'win32',
+        graceMs: 100
+    })
+
+    assert.equal(child.exitCode !== null || child.signalCode !== null, true)
 })
 
 test('a timed out permission request remains failed after the prompt returns', async () => {

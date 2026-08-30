@@ -45,6 +45,7 @@ export function createStdioAcpDriver(
         env,
         permissionPolicy: config.permissionPolicy || 'ask',
         permissionTimeoutMs: config.permissionTimeoutMs || 15 * 60 * 1000,
+        ownsProcessGroup: process.platform !== 'win32',
         async probe() {
             try {
                 const version = await probeCommand(
@@ -76,6 +77,7 @@ export function createStdioAcpDriver(
             return spawn(command, args, {
                 cwd: workspace,
                 env,
+                detached: process.platform !== 'win32',
                 stdio: ['pipe', 'pipe', 'pipe']
             })
         }
