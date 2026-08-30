@@ -62,6 +62,35 @@ test('permission requests remain pending after invalid input and accept an optio
     })
 })
 
+test('allow permission policy selects allow-once without creating a pending request', async () => {
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(
+        { ...driver(), permissionPolicy: 'allow' },
+        sink as any
+    )
+    const response = (runtime as any).requestPermission({
+        toolCall: {
+            toolCallId: 'tool-always-allow',
+            title: 'Write report.svg'
+        },
+        options: [
+            {
+                optionId: 'allow-always',
+                name: 'Always allow',
+                kind: 'allow_always'
+            },
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'deny', name: 'Reject', kind: 'reject_once' }
+        ]
+    })
+
+    assert.deepEqual(response, {
+        outcome: { outcome: 'selected', optionId: 'allow-once' }
+    })
+    assert.equal(sink.pendingRequest, undefined)
+    assert.equal(sink.state, 'created')
+})
+
 test('a canceled prompt cannot overwrite the terminal canceled state', async () => {
     const sink = createSink()
     const runtime = new AcpProcessRuntime(driver(), sink as any)

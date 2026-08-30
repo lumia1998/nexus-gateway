@@ -105,7 +105,7 @@ export class AcpProcessRuntime {
                 },
                 clientInfo: {
                     name: 'nexus-agentd',
-                    version: '0.2.1'
+                    version: '0.2.2'
                 }
             }
         )
@@ -322,6 +322,23 @@ export class AcpProcessRuntime {
                       outcome: {
                           outcome: 'selected',
                           optionId: reject.optionId
+                      }
+                  }
+                : { outcome: { outcome: 'cancelled' } }
+        }
+        if (this.driver.permissionPolicy === 'allow') {
+            const allow =
+                params.options.find(
+                    (option) => option.kind.toLowerCase() === 'allow_once'
+                ) ||
+                params.options.find((option) =>
+                    option.kind.toLowerCase().startsWith('allow')
+                )
+            return allow
+                ? {
+                      outcome: {
+                          outcome: 'selected',
+                          optionId: allow.optionId
                       }
                   }
                 : { outcome: { outcome: 'cancelled' } }

@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 恢复 ACP `allow`（始终允许）权限策略：WebUI、配置校验与运行时一致支持，无需逐次确认。
 - WebUI 重构为 Agent Nexus 管理控制台，并拆分为独立的样式、结构、图标和行为模块。
 - 管理员 Console Password 改为 scrypt 哈希与 HttpOnly Cookie；客户端改用可命名、可限制 Agent
   范围的多 API Key。

@@ -93,6 +93,7 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
                     protocol: 'acp',
                     driver: 'codex',
                     workspace: directory,
+                    permissionPolicy: 'allow',
                     args: []
                 },
                 remote: {
@@ -107,6 +108,7 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
         await writeFile(configPath, JSON.stringify(base))
         const config = await loadAgentdConfig(configPath)
         assert.equal(config.agents.local.protocol, 'acp')
+        assert.equal(config.agents.local.permissionPolicy, 'allow')
         assert.equal(config.agents.remote.protocol, 'a2a')
         if (config.agents.remote.protocol === 'a2a') {
             assert.equal(

@@ -100,6 +100,10 @@ npm install -g \
 `command`、`args`、`inheritEnv` 和 `env` 是仅可在本机配置文件修改的高级字段，WebUI 不接受这些
 字段。Workspace 在启动进程前经过 `realpath` 边界校验。
 
+ACP 权限策略支持 `ask`（询问）、`allow`（始终允许）和 `deny`（拒绝）。`allow` 会优先选择
+Agent 提供的 `allow_once`，不创建待确认请求；它适合管理员明确授权、工作区边界可信的自动化 Agent。
+默认仍为 `ask`。
+
 ### A2A
 
 A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现名称、能力和实际调用地址，
