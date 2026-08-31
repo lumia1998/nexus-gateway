@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { AcpProcessRuntime } from '../src/acp/runtime.js'
@@ -129,6 +132,61 @@ test('only ACP end_turn creates a verified completion proof', async () => {
         source: 'acp_prompt_response',
         stopReason: 'end_turn'
     })
+})
+
+test('captures a Hermes MEDIA marker as an artifact before completing the turn', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-marker-'))
+    const skillDirectory = path.join(directory, 'skill')
+    const workspace = path.join(directory, 'workspace')
+    const file = path.join(skillDirectory, 'wangjunkai.pptx')
+    await mkdir(skillDirectory, { recursive: true })
+    await writeFile(file, 'pptx-bytes')
+    const sink = createSink()
+    const runtime = new AcpProcessRuntime(driver(), sink as any)
+    ;(runtime as any).workspace = workspace
+    ;(runtime as any).connection = {
+        agent: {
+            async request() {
+                ;(runtime as any).sessionUpdate({
+                    update: {
+                        sessionUpdate: 'agent_message_chunk',
+                        messageId: 'assistant-1',
+                        content: {
+                            type: 'text',
+                            text: `PPT 已完成。\nMEDIA:${file}\n`
+                        }
+                    }
+                })
+                return { stopReason: 'end_turn' }
+            }
+        }
+    }
+
+    try {
+        await runtime.prompt('做个 PPT')
+        assert.equal(sink.state, 'completed')
+        assert.equal(sink.output, 'PPT 已完成。')
+        assert.equal(sink.artifacts.length, 1)
+        assert.match(sink.artifacts[0].id, /^media:/)
+        assert.deepEqual(
+            { ...sink.artifacts[0], id: undefined },
+            {
+                id: undefined,
+                name: 'wangjunkai.pptx',
+                filename: 'wangjunkai.pptx',
+                mediaType:
+                    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                bytesBase64: Buffer.from('pptx-bytes').toString('base64'),
+                metadata: {
+                    source: 'acp_media_marker',
+                    size: 10
+                }
+            }
+        )
+        assert.equal(sink.events.some((event) => event.type === 'artifact'), true)
+    } finally {
+        await rm(directory, { recursive: true, force: true })
+    }
 })
 
 test('ACP token and turn limits are incomplete rather than successful', async () => {
@@ -342,6 +400,9 @@ function createSink() {
         },
         appendOutput(text: string) {
             this.output += text
+        },
+        replaceOutput(text: string) {
+            this.output = text
         },
         addArtifact(artifact: any) {
             this.artifacts.push(structuredClone(artifact))

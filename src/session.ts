@@ -164,6 +164,12 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         this.syncRun({ output: this.output })
     }
 
+    replaceOutput(text: string) {
+        this.output = String(text || '').slice(0, this.maxOutputChars)
+        this.updatedAt = Date.now()
+        this.syncRun({ output: this.output || undefined })
+    }
+
     addArtifact(artifact: AgentdArtifact) {
         const next = structuredClone(artifact)
         const existingIndex = next.id

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as acp from '@agentclientprotocol/sdk'
 import type { AgentDriver } from '../drivers/index.js'
@@ -35,6 +35,8 @@ type FormElicitation = acp.CreateElicitationRequest & {
     requestedSchema: acp.ElicitationSchema
 }
 
+const MAX_MEDIA_MARKER_FILE_BYTES = 32 * 1024 * 1024
+
 export class AcpProcessRuntime {
     private process?: ChildProcessWithoutNullStreams
     private connection?: acp.ClientConnection
@@ -46,6 +48,8 @@ export class AcpProcessRuntime {
     private readonly promptTimeoutMs: number
     private promptCapabilities: acp.PromptCapabilities = {}
     private inputDirectory?: string
+    private workspace?: string
+    private promptOutput = ''
 
     constructor(
         private readonly driver: AgentDriver,
@@ -62,6 +66,7 @@ export class AcpProcessRuntime {
 
     async start(workspace: string) {
         if (this.process) throw new Error('ACP runtime is already started')
+        this.workspace = workspace
         this.inputDirectory = path.join(workspace, '.nexus-inputs', this.sink.id)
         const child = this.driver.spawn(workspace)
         this.process = child
@@ -132,6 +137,7 @@ export class AcpProcessRuntime {
         if (this.prompting) throw new Error('ACP session is already processing a prompt')
         const sessionId = this.requireSessionId()
         this.prompting = true
+        this.promptOutput = ''
         this.sink.clearPending()
         this.sink.setState('running')
         try {
@@ -148,6 +154,7 @@ export class AcpProcessRuntime {
             }
             switch (response.stopReason) {
                 case 'end_turn':
+                    await this.captureMediaMarkers()
                     this.sink.completeTurn({
                         source: 'acp_prompt_response',
                         stopReason: response.stopReason
@@ -444,6 +451,7 @@ export class AcpProcessRuntime {
         switch (update.sessionUpdate) {
             case 'agent_message_chunk':
                 if (update.content.type === 'text') {
+                    this.promptOutput += update.content.text
                     this.sink.appendOutput(update.content.text)
                     this.sink.emit('assistant_chunk', {
                         messageId: update.messageId,
@@ -519,6 +527,33 @@ export class AcpProcessRuntime {
     ) {
         const artifact = artifactFromContent(content, id, hint)
         if (artifact) this.sink.addArtifact(artifact)
+    }
+
+    private async captureMediaMarkers() {
+        const markers = mediaMarkers(this.promptOutput)
+        if (!markers.length) return
+        this.sink.replaceOutput(withoutMediaMarkers(this.promptOutput))
+        const seen = new Set<string>()
+        for (const marker of markers) {
+            if (seen.has(marker)) continue
+            seen.add(marker)
+            try {
+                const artifact = await artifactFromMediaMarker(
+                    marker,
+                    `media:${randomUUID()}`,
+                    this.workspace
+                )
+                this.sink.addArtifact(artifact)
+                this.sink.emit('artifact', artifact)
+            } catch (error) {
+                this.sink.emit('terminal_output', {
+                    stream: 'system',
+                    text: `Could not attach MEDIA artifact ${safeMarkerName(marker)}: ${
+                        error instanceof Error ? error.message : String(error)
+                    }`
+                })
+            }
+        }
     }
 
     private captureStderr(child: ChildProcessWithoutNullStreams) {
@@ -775,6 +810,106 @@ function filenameFromValue(value: string | null | undefined) {
 
 function usableUrl(value: string | null | undefined) {
     return value && /^(?:https?|file):/i.test(value) ? value : undefined
+}
+
+function mediaMarkers(output: string) {
+    return output
+        .split(/\r?\n/)
+        .map((line) => line.match(/^\s*MEDIA:\s*(.+?)\s*$/i)?.[1]?.trim())
+        .filter((value): value is string => Boolean(value))
+}
+
+function withoutMediaMarkers(output: string) {
+    return output
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*MEDIA:\s*(.+?)\s*$/i.test(line))
+        .join('\n')
+        .trim()
+}
+
+async function artifactFromMediaMarker(
+    marker: string,
+    id: string,
+    workspace?: string
+): Promise<AgentdArtifact> {
+    if (/^https?:\/\//i.test(marker)) {
+        const filename = artifactFilename(marker, undefined, 'resource', undefined)
+        return {
+            id,
+            name: filename,
+            filename,
+            url: marker,
+            metadata: { source: 'acp_media_marker' }
+        }
+    }
+
+    const localPath = marker.startsWith('file:')
+        ? fileURLToPath(marker)
+        : marker
+    const resolved = await realpath(
+        path.isAbsolute(localPath)
+            ? localPath
+            : path.resolve(workspace || process.cwd(), localPath)
+    )
+    const details = await stat(resolved)
+    if (!details.isFile()) {
+        throw new Error('declared path is not a regular file')
+    }
+    if (details.size > MAX_MEDIA_MARKER_FILE_BYTES) {
+        throw new Error(
+            `declared file exceeds the ${MAX_MEDIA_MARKER_FILE_BYTES} byte limit`
+        )
+    }
+    const filename = path.basename(resolved)
+    return {
+        id,
+        name: filename,
+        filename,
+        mediaType: mediaTypeForPath(filename),
+        bytesBase64: (await readFile(resolved)).toString('base64'),
+        metadata: {
+            source: 'acp_media_marker',
+            size: details.size
+        }
+    }
+}
+
+function safeMarkerName(marker: string) {
+    try {
+        return path.basename(marker.startsWith('file:') ? fileURLToPath(marker) : marker)
+    } catch {
+        return 'declared artifact'
+    }
+}
+
+function mediaTypeForPath(value: string) {
+    switch (path.extname(value).toLowerCase()) {
+        case '.pptx':
+            return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        case '.docx':
+            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        case '.xlsx':
+            return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        case '.pdf':
+            return 'application/pdf'
+        case '.png':
+            return 'image/png'
+        case '.jpg':
+        case '.jpeg':
+            return 'image/jpeg'
+        case '.gif':
+            return 'image/gif'
+        case '.webp':
+            return 'image/webp'
+        case '.mp3':
+            return 'audio/mpeg'
+        case '.wav':
+            return 'audio/wav'
+        case '.mp4':
+            return 'video/mp4'
+        default:
+            return 'application/octet-stream'
+    }
 }
 
 function artifactIndex(id: string) {

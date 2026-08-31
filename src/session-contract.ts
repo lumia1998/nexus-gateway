@@ -16,6 +16,7 @@ export interface AgentSessionSink {
     setState(state: AgentdSessionState, error?: string): void
     completeTurn(proof: AgentdTurnCompletionProof): boolean
     appendOutput(text: string): void
+    replaceOutput(text: string): void
     addArtifact(artifact: AgentdArtifact): void
     setPending(request: AgentdPendingRequest): void
     clearPending(): void
