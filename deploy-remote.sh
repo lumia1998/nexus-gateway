@@ -1,9 +1,10 @@
 #!/bin/bash
 # Deploy script for nexus-gateway to remote server
 
-REMOTE_HOST="10.1.2.40"
-REMOTE_USER="lumia"
-REMOTE_DIR="/home/lumia/nexus-gateway"
+# Configure your remote server details
+REMOTE_HOST="${REMOTE_HOST:-your-server-ip}"
+REMOTE_USER="${REMOTE_USER:-your-username}"
+REMOTE_DIR="/home/$REMOTE_USER/nexus-gateway"
 
 echo "=== Nexus Gateway Remote Deployment ==="
 echo "Target: $REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
@@ -30,7 +31,7 @@ tar -czf nexus-gateway-deploy.tar.gz \
 
 echo ""
 echo "Step 3: Copying to remote server..."
-echo "Please enter password when prompted (password: lumia)"
+echo "Please enter password when prompted"
 scp nexus-gateway-deploy.tar.gz $REMOTE_USER@$REMOTE_HOST:/tmp/
 
 echo ""

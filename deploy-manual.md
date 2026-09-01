@@ -12,16 +12,15 @@ tar -czf nexus-gateway.tar.gz dist/ package.json package-lock.json README.md LIC
 
 2. 使用 WinSCP 或 scp 上传到远程服务器：
 ```bash
-# 使用 scp（会提示输入密码: lumia）
-scp nexus-gateway.tar.gz lumia@10.1.2.40:/tmp/
+# 使用 scp（会提示输入密码）
+scp nexus-gateway.tar.gz user@your-server-ip:/tmp/
 ```
 
-### 在远程服务器 (10.1.2.40) 上：
+### 在远程服务器上：
 
 通过 SSH 登录：
 ```bash
-ssh lumia@10.1.2.40
-# 密码: lumia
+ssh user@your-server-ip
 ```
 
 然后执行：
@@ -56,7 +55,7 @@ nohup node dist/cli.js > nexus.log 2>&1 &
 ### 访问 WebUI
 
 浏览器打开：
-- http://10.1.2.40:8787/
+- http://your-server-ip:8787/
 
 首次访问会提示设置控制台密码（至少 12 位）
 

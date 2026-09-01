@@ -1,11 +1,14 @@
-$remoteHost = "10.1.2.40"
-$remoteUser = "lumia"
-$password = "lumia"
-$localFile = "D:\lumia\Desktop\claude_workspace\Nexus\nexus-gateway\nexus-gateway.tar.gz"
-$remoteDir = "/home/lumia/nexus-gateway"
+# Configure your server details here
+$remoteHost = "your-server-ip"
+$remoteUser = "your-username"
+$password = "your-password"
+$localFile = "nexus-gateway.tar.gz"
+$remoteDir = "/home/$remoteUser/nexus-gateway"
 
 Write-Host "=== Nexus Gateway Deployment via PowerShell ===" -ForegroundColor Cyan
 Write-Host "Target: $remoteUser@$remoteHost" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Please configure server details at the top of this script" -ForegroundColor Red
 
 # Convert password to secure string
 $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
