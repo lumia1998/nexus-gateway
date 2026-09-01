@@ -445,7 +445,7 @@ test('API Key Agent scope and session ownership are enforced independently', asy
             }
         )
         assert.equal(published.status, 201)
-        assert.deepEqual(sessions.published, [{ id: created.id, path: 'dist/report.md' }])
+        assert.deepEqual(sessions.published, [{ id: created.id, paths: ['dist/report.md'] }])
         assert.equal(
             (
                 await fetch(`${base}/v1/sessions/${created.id}`, {
@@ -553,7 +553,7 @@ class FakeSessions {
     readonly instanceId = 'test-instance'
     failInventory = false
     readonly resolutions: Array<Record<string, string>> = []
-    readonly published: Array<Record<string, string>> = []
+    readonly published: Array<{ id: string; paths: string[] }> = []
     readonly closed: string[] = []
     private readonly sessions = new Map<string, AgentdSessionView & { ownerKeyId: string }>()
 
@@ -625,9 +625,9 @@ class FakeSessions {
         return this.get(id)
     }
 
-    publishFile(id: string, path: string) {
-        this.published.push({ id, path })
-        return this.get(id)
+    publishFile(id: string, paths: string[]) {
+        this.published.push({ id, paths })
+        return { session: this.get(id), artifacts: [] }
     }
 
     close(id: string) {

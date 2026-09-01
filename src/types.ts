@@ -195,15 +195,35 @@ export interface AgentdApiKeyPrincipal {
     scope: AgentdApiKeyScope
 }
 
+export type AgentdPendingInputType =
+    | 'text'
+    | 'choice'
+    | 'confirmation'
+    | 'payment'
+    | 'unknown'
+
 export interface AgentdPendingRequest {
     id: string
     kind: 'permission' | 'input'
     prompt: string
+    /** Short, machine-readable step id derived from the elicitation source. */
+    step?: string
+    /**
+     * Semantic classification of the pending prompt. Clients may specialise
+     * their UX for `payment`, `confirmation`, `choice`, etc.
+     */
+    inputType?: AgentdPendingInputType
     options?: Array<{
         id: string
         name: string
         kind?: string
     }>
+    /**
+     * Extra fields extracted from the underlying elicitation (e.g. paymentUrl,
+     * confirmation flags, or ACP form defaults). Kept as a plain record so we
+     * do not couple the wire type to specific business schemas.
+     */
+    metadata?: Record<string, unknown>
 }
 
 export interface AgentdPendingResponse {

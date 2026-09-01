@@ -208,9 +208,18 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     }
 
     async publishFile(filePath: string) {
-        const requestedPath = String(filePath || '').trim()
-        if (!requestedPath) {
+        return (await this.publishFiles([filePath]))[0]
+    }
+
+    async publishFiles(filePaths: string[]) {
+        const requested = filePaths
+            .map((value) => String(value || '').trim())
+            .filter(Boolean)
+        if (!requested.length) {
             throw new SessionRequestError(400, 'path is required')
+        }
+        if (requested.length > 32) {
+            throw new SessionRequestError(400, 'A single publish request accepts at most 32 files')
         }
         if (!this.workspace) {
             throw new SessionRequestError(
@@ -218,10 +227,20 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
                 'This session does not have a local workspace'
             )
         }
+        const seen = new Set<string>()
+        const artifacts: AgentdArtifact[] = []
+        for (const requestedPath of requested) {
+            if (seen.has(requestedPath)) continue
+            seen.add(requestedPath)
+            artifacts.push(await this.publishSingleFile(requestedPath))
+        }
+        return artifacts
+    }
 
+    private async publishSingleFile(requestedPath: string) {
         let handle: Awaited<ReturnType<typeof open>> | undefined
         try {
-            const workspaceRoot = await realpath(this.workspace)
+            const workspaceRoot = await realpath(this.workspace!)
             const unresolved = resolve(workspaceRoot, requestedPath)
             const target = await realpath(unresolved)
             assertWorkspacePath(workspaceRoot, target)
@@ -474,6 +493,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 export class SessionManager {
     readonly instanceId = randomUUID()
     private sessions = new Map<string, ManagedSession>()
+    private sessionLocks = new Map<string, Promise<unknown>>()
     private cleanupTimer?: NodeJS.Timeout
     private readinessCache?: { expiresAt: number; agents: AgentdAgentView[] }
 
@@ -658,9 +678,11 @@ export class SessionManager {
     async message(id: string, message: string, attachmentIds: string[] = []) {
         const text = String(message || '')
         if (!text.trim()) throw new SessionRequestError(400, 'message is required')
-        const session = this.require(id)
-        await session.message(text, attachmentIds)
-        return session.snapshot()
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            await session.message(text, attachmentIds)
+            return session.snapshot()
+        })
     }
 
     async resolvePending(
@@ -668,9 +690,11 @@ export class SessionManager {
         response: AgentdPendingResponse,
         attachmentIds: string[] = []
     ) {
-        const session = this.require(id)
-        await session.resolvePending(response, attachmentIds)
-        return session.snapshot()
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            await session.resolvePending(response, attachmentIds)
+            return session.snapshot()
+        })
     }
 
     addInputAttachment(
@@ -683,25 +707,31 @@ export class SessionManager {
         return session.addInputAttachment(name, mediaType, bytes)
     }
 
-    async publishFile(id: string, path: string) {
-        const session = this.require(id)
-        await session.publishFile(path)
-        return session.snapshot()
+    async publishFile(id: string, paths: string[]) {
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            const artifacts = await session.publishFiles(paths)
+            return { session: session.snapshot(), artifacts }
+        })
     }
 
     async cancel(id: string) {
-        const session = this.require(id)
-        await session.cancel()
-        return session.snapshot()
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            await session.cancel()
+            return session.snapshot()
+        })
     }
 
     async close(id: string) {
-        const session = this.require(id)
-        if (isActive(session.state)) await session.cancel()
-        const snapshot = session.snapshot()
-        await session.dispose()
-        this.sessions.delete(id)
-        return snapshot
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            if (isActive(session.state)) await session.cancel()
+            const snapshot = session.snapshot()
+            await session.dispose()
+            this.sessions.delete(id)
+            return snapshot
+        })
     }
 
     eventsAfter(id: string, after?: string) {
@@ -722,6 +752,27 @@ export class SessionManager {
             })
         )
         this.sessions.clear()
+    }
+
+    private async withSessionLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
+        // Serialise mutating operations per session so that concurrent
+        // message / resolvePending / cancel / close / publish requests cannot
+        // observe half-updated state (e.g. artifacts reset in the middle of
+        // publishFile).
+        const previous = this.sessionLocks.get(id) || Promise.resolve()
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => {
+            release = resolve
+        })
+        const tail = previous.then(() => gate)
+        this.sessionLocks.set(id, tail)
+        try {
+            await previous
+            return await operation()
+        } finally {
+            release()
+            if (this.sessionLocks.get(id) === tail) this.sessionLocks.delete(id)
+        }
     }
 
     private require(id: string) {

@@ -1,4 +1,4 @@
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 
 const scrypt = promisify(scryptCallback)
@@ -45,29 +45,44 @@ export function validateAdminPassword(input: string) {
 }
 
 export class AdminSessionStore {
+    // Stored keys are SHA-256 digests of the raw session id so a timing attack
+    // on Map lookup / string comparison cannot learn a valid prefix. The raw
+    // id never leaves the HttpOnly cookie.
     private readonly sessions = new Map<string, number>()
 
     constructor(private readonly ttlMs: number) {}
 
     create() {
         this.cleanup()
-        const id = randomBytes(32).toString('base64url')
-        this.sessions.set(id, Date.now() + this.ttlMs)
-        return id
+        const raw = randomBytes(32).toString('base64url')
+        this.sessions.set(digest(raw), Date.now() + this.ttlMs)
+        return raw
     }
 
     has(id: string) {
-        const expiresAt = this.sessions.get(id)
-        if (!expiresAt) return false
+        if (typeof id !== 'string' || !id) return false
+        const key = digest(id)
+        let match: string | undefined
+        // Walk every stored digest in constant time. `timingSafeEqual` requires
+        // equal-length inputs, which is guaranteed because all digests have the
+        // same byte length.
+        for (const stored of this.sessions.keys()) {
+            const a = Buffer.from(stored, 'hex')
+            const b = Buffer.from(key, 'hex')
+            if (a.length === b.length && timingSafeEqual(a, b)) match = stored
+        }
+        if (!match) return false
+        const expiresAt = this.sessions.get(match)!
         if (expiresAt <= Date.now()) {
-            this.sessions.delete(id)
+            this.sessions.delete(match)
             return false
         }
         return true
     }
 
     delete(id: string) {
-        this.sessions.delete(id)
+        if (typeof id !== 'string' || !id) return
+        this.sessions.delete(digest(id))
     }
 
     clear() {
@@ -80,4 +95,8 @@ export class AdminSessionStore {
             if (expiresAt <= now) this.sessions.delete(id)
         }
     }
+}
+
+function digest(value: string) {
+    return createHash('sha256').update(value, 'utf8').digest('hex')
 }

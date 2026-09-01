@@ -359,11 +359,16 @@ export class AcpProcessRuntime {
             prompt:
                 params.toolCall.title ||
                 `Permission requested for tool ${params.toolCall.toolCallId}`,
+            inputType: 'confirmation',
+            step: params.toolCall.toolCallId
+                ? `tool:${params.toolCall.toolCallId}`
+                : undefined,
             options: params.options.map((option) => ({
                 id: option.optionId,
                 name: option.name,
                 kind: option.kind
-            }))
+            })),
+            metadata: permissionMetadata(params)
         }
         this.sink.setPending(request)
         return new Promise<acp.RequestPermissionResponse>((resolve, reject) => {
@@ -401,7 +406,8 @@ export class AcpProcessRuntime {
                 params.mode === 'url'
                     ? `${params.message}\n${params.url}`
                     : params.message,
-            options: elicitationOptions(params)
+            options: elicitationOptions(params),
+            ...elicitationClassification(params)
         }
         this.sink.setPending(request)
         return new Promise<acp.CreateElicitationResponse>((resolve) => {
@@ -557,6 +563,11 @@ export class AcpProcessRuntime {
     }
 
     private captureStderr(child: ChildProcessWithoutNullStreams) {
+        // Explicit UTF-8 streaming decoder: `String(chunk)` on a Buffer uses the
+        // default binary encoding, which mangles multi-byte characters if a
+        // chunk boundary splits a rune. `TextDecoder` with `stream: true`
+        // preserves the split byte between calls.
+        const decoder = new TextDecoder('utf-8')
         let buffer = ''
         let flushed = false
         const emit = (text: string) => {
@@ -584,10 +595,17 @@ export class AcpProcessRuntime {
         const flush = () => {
             if (flushed) return
             flushed = true
+            buffer += decoder.decode()
             drain(true)
         }
         child.stderr.on('data', (chunk) => {
-            buffer += String(chunk)
+            const bytes =
+                chunk instanceof Uint8Array
+                    ? chunk
+                    : Buffer.isBuffer(chunk)
+                      ? chunk
+                      : Buffer.from(String(chunk))
+            buffer += decoder.decode(bytes, { stream: true })
             drain()
         })
         child.stderr.once('end', flush)
@@ -1005,4 +1023,99 @@ function isFormElicitation(
                     'object'
         )
     )
+}
+
+/**
+ * Derive Agent Nexus semantic classification (inputType / step / metadata) from
+ * an ACP elicitation request. This is a best-effort projection: we look at the
+ * elicitation mode, the requested schema shape and well-known field names to
+ * decide whether the pending request is a plain text prompt, a choice, a
+ * yes/no confirmation, or a payment URL flow.
+ */
+function elicitationClassification(
+    params: acp.CreateElicitationRequest
+): Pick<AgentdPendingRequest, 'inputType' | 'step' | 'metadata'> {
+    const metadata: Record<string, unknown> = {}
+    let inputType: AgentdPendingRequest['inputType'] = 'unknown'
+    let step: string | undefined
+    if (params.mode === 'url') {
+        const url = String((params as { url?: unknown }).url || '').trim()
+        if (url) {
+            metadata.paymentUrl = url
+            metadata.url = url
+        }
+        inputType = /pay|支付|invoice|order/i.test(
+            `${params.message || ''} ${url}`
+        )
+            ? 'payment'
+            : 'text'
+        step = 'url'
+    } else if (isFormElicitation(params)) {
+        const properties = params.requestedSchema.properties || {}
+        const entries = Object.entries(properties)
+        step = entries.length === 1 ? entries[0][0] : 'form'
+        if (entries.length === 1) {
+            const [, schema] = entries[0]
+            if (schema.type === 'boolean') inputType = 'confirmation'
+            else if (
+                Array.isArray((schema as { oneOf?: unknown }).oneOf) ||
+                Array.isArray((schema as { enum?: unknown[] }).enum)
+            ) {
+                inputType = 'choice'
+            } else {
+                inputType = 'text'
+            }
+        } else {
+            inputType = 'text'
+        }
+        const paymentUrl = firstStringFromSchema(properties, [
+            'paymentUrl',
+            'payUrl',
+            'payment_url',
+            'checkoutUrl'
+        ])
+        if (paymentUrl) {
+            metadata.paymentUrl = paymentUrl
+            inputType = 'payment'
+        }
+    } else {
+        inputType = 'text'
+    }
+    return {
+        inputType,
+        ...(step ? { step } : {}),
+        ...(Object.keys(metadata).length ? { metadata } : {})
+    }
+}
+
+function permissionMetadata(
+    params: acp.RequestPermissionRequest
+): Record<string, unknown> | undefined {
+    const metadata: Record<string, unknown> = {}
+    const call = params.toolCall as { toolCallId?: unknown; name?: unknown; title?: unknown }
+    if (typeof call?.toolCallId === 'string' && call.toolCallId) {
+        metadata.toolCallId = call.toolCallId
+    }
+    if (typeof call?.name === 'string' && call.name) {
+        metadata.tool = call.name
+    }
+    return Object.keys(metadata).length ? metadata : undefined
+}
+
+function firstStringFromSchema(
+    properties: Record<string, unknown>,
+    candidates: string[]
+) {
+    for (const key of candidates) {
+        const schema = properties[key] as
+            | { const?: unknown; default?: unknown }
+            | undefined
+        if (!schema) continue
+        const value =
+            (typeof schema.const === 'string' && schema.const) ||
+            (typeof schema.default === 'string' && schema.default) ||
+            ''
+        if (value) return value
+    }
+    return undefined
 }

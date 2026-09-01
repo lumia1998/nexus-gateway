@@ -322,13 +322,19 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                 this.sink.clearPending()
                 this.sink.setState('canceled')
                 break
-            case TaskState.TASK_STATE_INPUT_REQUIRED:
+            case TaskState.TASK_STATE_INPUT_REQUIRED: {
+                const classification = a2aInputClassification(
+                    statusText,
+                    status.message
+                )
                 this.sink.setPending({
                     id: this.taskId || randomUUID(),
                     kind: 'input',
-                    prompt: statusText || 'The A2A agent requires additional input.'
+                    prompt: statusText || 'The A2A agent requires additional input.',
+                    ...classification
                 })
                 break
+            }
             case TaskState.TASK_STATE_FAILED:
             case TaskState.TASK_STATE_REJECTED:
             case TaskState.TASK_STATE_AUTH_REQUIRED:
@@ -509,4 +515,35 @@ function disabledView(id: string, config: AgentdA2AConfig): AgentdAgentView {
 
 function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Detect payment / confirmation / choice hints in an A2A `input_required`
+ * message so the Gateway can surface them on `pendingRequest.metadata` and
+ * `inputType`. The A2A protocol has no first-class field for these so we
+ * scan text parts for URLs and simple keywords.
+ */
+function a2aInputClassification(statusText: string, message?: Message | undefined) {
+    const metadata: Record<string, unknown> = {}
+    const haystack = [
+        statusText,
+        ...(message?.parts ? textParts(message.parts) : [])
+    ]
+        .filter(Boolean)
+        .join('\n')
+    const urlMatch = haystack.match(/https?:\/\/\S+/)
+    if (urlMatch) metadata.url = urlMatch[0]
+    let inputType: 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown' = 'text'
+    if (/pay|支付|invoice|checkout|订单支付/i.test(haystack)) {
+        inputType = 'payment'
+        if (urlMatch) metadata.paymentUrl = urlMatch[0]
+    } else if (/[（(]\s*[yY]\s*\/\s*[nN]\s*[)）]|确认|是否/i.test(haystack)) {
+        inputType = 'confirmation'
+    } else if (/(?:\n|^)\s*(?:\d+[.、]|[-*])\s+\S/.test(haystack)) {
+        inputType = 'choice'
+    }
+    return {
+        inputType,
+        ...(Object.keys(metadata).length ? { metadata } : {})
+    }
 }

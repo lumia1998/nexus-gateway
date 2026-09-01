@@ -317,15 +317,13 @@ async function handleRequest(context: RequestContext) {
         assertAgentScope(principal, session.agentId)
         assertJsonContentType(request)
         const body = await readJsonBody(request, config.maxRequestBytes)
-        assertOnlyKeys(body, ['path'])
-        writeJson(
-            response,
-            201,
-            await sessions.publishFile(
-                sessionId,
-                requiredString(body.path, 'path')
-            )
-        )
+        assertOnlyKeys(body, ['path', 'paths'])
+        const paths = normalizePublishPaths(body)
+        const result = await sessions.publishFile(sessionId, paths)
+        writeJson(response, 201, {
+            ...result.session,
+            publishedArtifacts: result.artifacts
+        })
         return
     }
 
@@ -618,20 +616,45 @@ function streamEvents(
     response.flushHeaders?.()
     for (const event of sessions.eventsAfter(sessionId, after)) writeEvent(response, event)
     const unsubscribe = sessions.subscribe(sessionId, (event) => writeEvent(response, event))
-    const heartbeat = setInterval(() => {
-        if (!response.destroyed && !response.writableEnded) response.write(': heartbeat\n\n')
-    }, 15_000)
-    heartbeat.unref?.()
+    // Give idle SSE clients ~90 s to react before Node's default socket timeout
+    // trips. Combined with the writableEnded check inside the heartbeat this
+    // guarantees stuck keep-alive sessions eventually release their slot even
+    // if the peer never sends a FIN.
+    const idleMs = 90_000
+    request.socket.setTimeout?.(idleMs)
     let closed = false
     const close = () => {
         if (closed) return
         closed = true
         clearInterval(heartbeat)
         unsubscribe()
+        // Ensure both ends of the socket are actually torn down so the SSE
+        // slot returns to the pool even when the peer stops reading without
+        // closing the TCP connection cleanly.
+        try {
+            if (!response.writableEnded) response.end()
+        } catch {}
+        try {
+            request.socket.destroy()
+        } catch {}
         release()
     }
+    const heartbeat = setInterval(() => {
+        if (response.destroyed || response.writableEnded) {
+            close()
+            return
+        }
+        try {
+            response.write(': heartbeat\n\n')
+        } catch {
+            close()
+        }
+    }, 15_000)
+    heartbeat.unref?.()
     request.once('close', close)
     response.once('close', close)
+    request.socket.once('timeout', close)
+    request.socket.once('error', close)
 }
 
 function writeEvent(response: ServerResponse, event: AgentdEvent) {
@@ -815,6 +838,20 @@ function optionalAttachmentIds(value: unknown) {
         throw new RequestError(400, 'attachments must be an array with at most 16 ids')
     }
     return value.map((item) => requiredString(item, 'attachments'))
+}
+
+function normalizePublishPaths(body: Record<string, unknown>): string[] {
+    const bodyPaths = body.paths
+    if (bodyPaths !== undefined) {
+        if (!Array.isArray(bodyPaths) || bodyPaths.length === 0) {
+            throw new RequestError(400, 'paths must be a non-empty array of strings')
+        }
+        if (bodyPaths.length > 32) {
+            throw new RequestError(400, 'paths accepts at most 32 entries')
+        }
+        return bodyPaths.map((item) => requiredString(item, 'paths'))
+    }
+    return [requiredString(body.path, 'path')]
 }
 
 function normalizedMediaType(value: string | string[] | undefined) {

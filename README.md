@@ -156,8 +156,9 @@ HTTP 上传总上限由 `maxAttachmentBytes` 控制，默认 32 MiB，允许调�
 `file://` resource link；A2A 则以带文件名和媒体类型的二进制 Part 发送。
 
 ACP Session 还支持显式发布工作区文件。发布接口只接受 realpath 仍位于该 Session 工作区中的普通文件，
-拒绝目录、路径穿越和符号链接逃逸，单个文件最多 12 MiB。响应将文件作为 Session Artifact 返回；不会
-暴露宿主机绝对路径。
+拒绝目录、路径穿越和符号链接逃逸，单个文件最多 12 MiB。请求 body 支持单文件 `{ "path": "..." }` 或
+批量 `{ "paths": ["..."] }`（一次最多 32 条），响应在正常 Session 视图上附加
+`publishedArtifacts` 数组，本次发布的文件以 base64 内联返回；不会暴露宿主机绝对路径，也不生成外部 URL。
 
 API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
 旧 `authToken` 复制到该字段。
