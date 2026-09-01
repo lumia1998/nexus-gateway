@@ -116,12 +116,12 @@ nav { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 .danger-text { color: var(--danger); }
 
 /* Main Content */
-.main { margin-left: var(--sidebar-width); min-height: 100vh; padding: 40px clamp(32px, 5vw, 80px) 80px; background: var(--bg); }
-.page-header { min-height: 72px; display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; margin-bottom: 32px; }
+.main { margin-left: var(--sidebar-width); min-height: 100vh; padding: 40px 0 80px; background: var(--bg); }
+.page-header { min-height: 72px; display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; margin-bottom: 32px; padding: 0 clamp(32px, 5vw, 80px); max-width: 1600px; margin-left: auto; margin-right: auto; }
 .page-header h1 { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; }
 .page-header p { margin: 8px 0 0; color: var(--text-muted); font-size: 14px; line-height: 1.5; }
 .page-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.page-content { max-width: 1280px; }
+.page-content { max-width: 1600px; padding: 0 clamp(32px, 5vw, 80px); margin: 0 auto; }
 /* Buttons */
 .button, .icon-button {
   min-height: 40px;
