@@ -25,7 +25,7 @@ import type {
     AgentdProtocol,
     PermissionPolicy
 } from './types.js'
-import { redirectToAgentdWebUi, writeAgentdWebUi } from './webui/index.js'
+import { redirectToAgentdWebUi, writeAgentdWebUi, writeAgentdWebUiModule } from './webui/index.js'
 
 const ADMIN_COOKIE = 'agent_nexus_admin'
 
@@ -125,6 +125,10 @@ async function handleRequest(context: RequestContext) {
     }
     if ((url.pathname === '/ui' || url.pathname === '/ui/') && request.method === 'GET') {
         writeAgentdWebUi(response)
+        return
+    }
+    if (url.pathname.startsWith('/ui/') && request.method === 'GET') {
+        writeAgentdWebUiModule(response, url.pathname)
         return
     }
     if (url.pathname === '/health' && request.method === 'GET') {

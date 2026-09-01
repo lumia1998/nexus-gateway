@@ -27,20 +27,34 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥', '运行设置']) {
             assert.match(html, new RegExp(`>${label}<`))
         }
-        assert.match(html, /Session 空闲有效期（小时）/)
-        assert.match(html, /清理任务周期（秒）/)
-        assert.match(html, /权限确认超时（秒）/)
-        assert.match(html, /请求超时（秒）/)
-        const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
-        assert.ok(script)
-        assert.doesNotThrow(() => new Function(script))
-        assert.match(html, /检查中/)
-        assert.doesNotMatch(html, /尚未检查/)
-        assert.match(html, /Agent Card URL/)
-        assert.match(html, /首选传输/)
-        assert.match(html, /Bearer Token/)
+        assert.match(html, /<script type="module" defer src="\/ui\/app\.js"><\/script>/)
         assert.doesNotMatch(html, /gradient|backdrop-filter|sessionStorage|nexus-agentd-token/i)
         assert.doesNotMatch(html, /react|vue|unpkg|jsdelivr/i)
+
+        const entry = await fetch(`${fixture.base}/ui/app.js`)
+        assert.equal(entry.status, 200)
+        assert.match(entry.headers.get('content-type') || '', /text\/javascript/)
+
+        const renderModule = await fetch(`${fixture.base}/ui/app/render.js`)
+        assert.equal(renderModule.status, 200)
+        const renderSource = await renderModule.text()
+        assert.match(renderSource, /Session 空闲有效期（小时）/)
+        assert.match(renderSource, /清理任务周期（秒）/)
+        assert.match(renderSource, /权限确认超时（秒）/)
+        assert.match(renderSource, /请求超时（秒）/)
+        assert.match(renderSource, /检查中/)
+        assert.doesNotMatch(renderSource, /尚未检查/)
+        assert.match(renderSource, /Agent Card URL/)
+        assert.match(renderSource, /首选传输/)
+        assert.match(renderSource, /Bearer Token/)
+        assert.doesNotMatch(renderSource, /sessionStorage|nexus-agentd-token/i)
+
+        for (const name of ['state', 'dom', 'icons', 'format', 'api', 'toast', 'theme', 'drawer', 'screens', 'data', 'main']) {
+            const moduleResponse = await fetch(`${fixture.base}/ui/app/${name}.js`)
+            assert.equal(moduleResponse.status, 200, `module ${name} should be served`)
+            assert.match(moduleResponse.headers.get('content-type') || '', /text\/javascript/)
+        }
+        assert.equal((await fetch(`${fixture.base}/ui/app/unknown.js`)).status, 404)
         assert.equal((await fetch(`${fixture.base}/`)).url, `${fixture.base}/ui/`)
     } finally {
         await fixture.close()
