@@ -190,8 +190,8 @@ function renderWorkspaces() {
   actions.innerHTML = '<button id="add-workspace" class="button primary">' + icons.plus + '添加工作区</button>'
   const roots = state.config.workspaceRoots || []
   content.innerHTML = '<div class="workspace-list">' +
-    roots.map((root, index) => '<div class="list-row"><div class="list-row-main"><strong class="path">' + escapeHtml(root) + '</strong><small>ACP 会话允许访问的根目录</small></div><div class="row-actions"><button class="button small" data-workspace-edit="' + index + '">编辑</button><button class="button small danger" data-workspace-delete="' + index + '"' + (roots.length === 1 ? ' disabled' : '') + '>删除</button></div></div>').join('') +
-    '</div><div class="tip">建议仅添加必要的最小目录范围。启动 ACP 会话前，Agent Nexus 会解析并校验真实路径。</div>'
+    roots.map((root, index) => '<div class="list-row"><div class="list-row-main"><strong class="path">' + escapeHtml(root) + '</strong></div><div class="row-actions"><button class="button small" data-workspace-edit="' + index + '">编辑</button><button class="button small danger" data-workspace-delete="' + index + '"' + (roots.length === 1 ? ' disabled' : '') + '>删除</button></div></div>').join('') +
+    '</div>'
   byId('add-workspace').onclick = () => openWorkspaceDrawer()
 }
 
@@ -202,7 +202,7 @@ function keyRow(key) {
   const name = key.legacy && key.name === 'Legacy Access Key' ? '旧版访问密钥' : key.name
   const id = escapeHtml(key.id)
   const toggleLabel = key.enabled ? '禁用密钥' : '启用密钥'
-  return '<tr><td><div class="agent-name"><strong>' + escapeHtml(name) + '</strong><small>' + (key.legacy ? '从旧版配置迁移' : '创建于 ' + formatDate(key.createdAt)) + '</small></div></td>' +
+  return '<tr><td><div class="agent-name"><strong>' + escapeHtml(name) + '</strong></div></td>' +
     '<td>' + (key.enabled ? '<span class="status ready">已启用</span>' : '<span class="status">已禁用</span>') + '</td>' +
     '<td><div class="key-secret-cell"><code>••••' + escapeHtml(key.suffix) + '</code><button class="key-copy-button" data-key-action="copy" data-key-id="' + id + '" aria-label="复制完整密钥" title="复制完整密钥">' + icons.copy + '</button></div></td>' +
     '<td><span class="key-scope">' + escapeHtml(scope) + '</span></td>' +
@@ -214,7 +214,7 @@ function renderApiKeys() {
   closeKeyActionMenu()
   actions.innerHTML = '<button id="create-key" class="button primary">' + icons.plus + '创建 API 密钥</button>'
   content.innerHTML = state.apiKeys.length
-    ? '<div class="table-wrap"><table class="key-table"><thead><tr><th>名称</th><th>状态</th><th>API 密钥</th><th>授权范围</th><th>最后使用</th><th>操作</th></tr></thead><tbody>' + state.apiKeys.map(keyRow).join('') + '</tbody></table></div>'
+    ? '<div class="table-wrap key-table-wrap"><table class="key-table"><thead><tr><th>名称</th><th>状态</th><th>API 密钥</th><th>授权范围</th><th>最后使用</th><th>操作</th></tr></thead><tbody>' + state.apiKeys.map(keyRow).join('') + '</tbody></table></div>'
     : '<div class="panel">' + emptyState(icons.key, '尚未创建 API 密钥', '客户端需要访问网关数据接口时再创建即可。') + '</div>'
   byId('create-key').onclick = () => openKeyDrawer()
 }

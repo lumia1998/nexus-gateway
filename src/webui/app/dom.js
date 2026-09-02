@@ -9,6 +9,7 @@ export const description = byId('page-description')
 export const drawer = byId('drawer')
 export const drawerBackdrop = byId('drawer-backdrop')
 export const drawerForm = byId('drawer-form')
+export const drawerFooter = byId('drawer-footer')
 
 export const keyActionMenu = document.createElement('div')
 keyActionMenu.className = 'key-action-menu hidden'

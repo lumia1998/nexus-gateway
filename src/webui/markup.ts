@@ -65,6 +65,7 @@ export const markup = String.raw`
 <aside id="drawer" class="drawer hidden" aria-modal="true" role="dialog">
   <div class="drawer-header"><h2 id="drawer-title"></h2><button id="drawer-close" class="icon-button" aria-label="关闭">${icons.close}</button></div>
   <form id="drawer-form" class="drawer-body"></form>
+  <div id="drawer-footer" class="drawer-footer"></div>
 </aside>
 <div id="toast-region" class="toast-region" aria-live="assertive"></div>
 `

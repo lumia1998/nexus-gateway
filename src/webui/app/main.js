@@ -1,5 +1,5 @@
 import { state } from './state.js'
-import { byId, content, drawerForm, drawerBackdrop, keyActionMenu } from './dom.js'
+import { byId, content, drawerForm, drawerFooter, drawerBackdrop, keyActionMenu } from './dom.js'
 import { api } from './api.js'
 import { toast, runAction } from './toast.js'
 import { boot, enterApp, showLogin } from './screens.js'
@@ -168,6 +168,9 @@ drawerForm.onsubmit = async (event) => {
   try { await submit(drawerForm) } catch (reason) { error.textContent = reason.message }
 }
 drawerForm.addEventListener('click', (event) => {
+  if (event.target.closest('[data-close-drawer]')) closeDrawer()
+})
+drawerFooter.addEventListener('click', (event) => {
   if (event.target.closest('[data-close-drawer]')) closeDrawer()
 })
 byId('drawer-close').onclick = closeDrawer
