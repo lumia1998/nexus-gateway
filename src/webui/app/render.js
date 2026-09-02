@@ -1,5 +1,5 @@
 import { state, pageMeta } from './state.js'
-import { byId, content, actions, description, keyActionMenu, escapeHtml, selected, checked } from './dom.js'
+import { byId, content, actions, keyActionMenu, escapeHtml, selected, checked } from './dom.js'
 import { icons } from './icons.js'
 import { api, localizeError } from './api.js'
 import { toast, runAction } from './toast.js'
@@ -9,9 +9,7 @@ import { loadAll, refreshRuns, refreshReadiness } from './data.js'
 import { shortId, formatDate, formatDuration, runStatusLabel, permissionLabel } from './format.js'
 
 export function render() {
-  const meta = pageMeta[state.page]
-  byId('page-title').textContent = meta[0]
-  description.textContent = meta[1]
+  byId('page-title').textContent = pageMeta[state.page]
   document.querySelectorAll('.nav-item').forEach((item) => {
     item.classList.toggle('active', item.dataset.page === state.page)
   })
@@ -64,10 +62,10 @@ function renderOverview() {
       stat('就绪', ready) +
       stat('会话', state.sessions) +
     '</div>' +
-    '<div class="panel"><div class="panel-header"><h2>智能体</h2><span class="muted">每 20 秒自动检查</span></div>' +
+    '<div class="panel"><div class="panel-header"><h2>智能体</h2></div>' +
       (agents.length
         ? '<div class="panel-body overview-list">' + agents.map(overviewAgent).join('') + '</div>'
-        : emptyState(icons.robot, '尚未配置智能体', '前往「智能体」页面添加第一个 ACP 或 A2A 智能体。')) +
+        : emptyState(icons.robot, '尚未配置智能体', '', { action: 'add-agent', label: '添加智能体' })) +
     '</div>'
   byId('refresh-overview').onclick = () => refreshReadiness(true)
 }
@@ -89,7 +87,7 @@ function runCard(run) {
 }
 
 function runRow(run) {
-  return '<tr data-run-detail="' + escapeHtml(run.id) + '"><td><div class="agent-name"><strong>' + escapeHtml(run.agentName) + '</strong><small>' + escapeHtml(run.protocol.toUpperCase()) + '</small></div></td><td class="run-task-cell"><strong>' + escapeHtml(run.task) + '</strong><small class="run-id">' + escapeHtml(shortId(run.id)) + '</small></td><td class="run-task-cell"><strong>' + escapeHtml(run.resultSummary || run.error || '—') + '</strong><small>' + escapeHtml(run.progress && run.progress.phase || '') + '</small></td><td>' + runStatus(run.state) + '</td><td>' + escapeHtml(formatDate(run.startedAt)) + '</td><td>' + escapeHtml(formatDuration(run)) + '</td></tr>'
+  return '<tr data-run-detail="' + escapeHtml(run.id) + '"><td><div class="agent-name"><strong>' + escapeHtml(run.agentName) + '</strong><small>' + escapeHtml(run.protocol.toUpperCase()) + '</small></div></td><td class="run-task-cell"><strong>' + escapeHtml(run.task) + '</strong><small class="run-id">' + escapeHtml(shortId(run.id)) + '</small></td><td class="run-task-cell"><strong>' + escapeHtml(run.resultSummary || run.error || '—') + '</strong><small>' + escapeHtml(run.progress && run.progress.phase || '') + '</small></td><td>' + runStatus(run.state) + '</td><td class="num">' + escapeHtml(formatDate(run.startedAt)) + '</td><td class="num">' + escapeHtml(formatDuration(run)) + '</td></tr>'
 }
 
 export function renderRuns() {
@@ -105,7 +103,16 @@ export function renderRuns() {
   const completed = state.runs.filter((run) => run.state === 'completed').length
   const failed = state.runs.filter((run) => run.state === 'failed').length
   const agentOptions = state.config.agents.map((agent) => '<option value="' + escapeHtml(agent.id) + '"' + selected(state.runAgent, agent.id) + '>' + escapeHtml(agent.name) + '</option>').join('')
-  actions.innerHTML = '<span class="muted">每 5 秒自动刷新</span><button id="refresh-runs" class="button">' + icons.refresh + '立即刷新</button>'
+  actions.innerHTML = '<button id="refresh-runs" class="button">' + icons.refresh + '刷新</button>'
+  byId('refresh-runs').onclick = () => refreshRuns(true)
+
+  if (!state.runs.length) {
+    content.innerHTML = '<div class="panel">' +
+      emptyState(icons.activity, '暂无运行记录', '客户端通过网关数据接口发起任务后，进度与结果会出现在这里。') +
+      '</div>'
+    return
+  }
+
   content.innerHTML =
     '<div class="run-summary">' +
       runSummary('当前运行', state.runs.filter((run) => activeStates.has(run.state)).length) +
@@ -117,14 +124,13 @@ export function renderRuns() {
     '<select id="run-agent-filter"><option value="all">全部智能体</option>' + agentOptions + '</select>' +
     '<select id="run-status-filter"><option value="all">全部状态</option><option value="running"' + selected(state.runStatus, 'running') + '>运行中</option><option value="input_required"' + selected(state.runStatus, 'input_required') + '>等待输入</option><option value="permission_required"' + selected(state.runStatus, 'permission_required') + '>等待授权</option><option value="completed"' + selected(state.runStatus, 'completed') + '>已完成</option><option value="failed"' + selected(state.runStatus, 'failed') + '>失败</option><option value="canceled"' + selected(state.runStatus, 'canceled') + '>已取消</option></select></div>' +
     '<section class="run-section"><div class="run-section-title"><h2>当前运行</h2><span>' + active.length + ' 项</span></div>' +
-      (active.length ? '<div class="run-live-grid">' + active.map(runCard).join('') + '</div>' : '<div class="panel">' + emptyState(icons.activity, '当前没有任务', '没有正在执行或等待处理的任务。') + '</div>') +
+      (active.length ? '<div class="run-live-grid">' + active.map(runCard).join('') + '</div>' : '<div class="panel">' + emptyState(icons.activity, '当前没有任务') + '</div>') +
     '</section>' +
     '<section class="run-section"><div class="run-section-title"><h2>历史记录</h2><span>' + history.length + ' 项</span></div>' +
-      '<div class="table-wrap"><table class="run-table"><thead><tr><th>智能体</th><th>任务</th><th>结果</th><th>状态</th><th>开始时间</th><th>耗时</th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table class="run-table"><thead><tr><th>智能体</th><th>任务</th><th>结果</th><th>状态</th><th class="num">开始时间</th><th class="num">耗时</th></tr></thead><tbody>' +
       (history.length ? history.map(runRow).join('') : '<tr><td colspan="6" class="empty">没有符合条件的历史记录。</td></tr>') +
       '</tbody></table></div></section>'
-  byId('refresh-runs').onclick = () => refreshRuns(true)
-  byId('run-search').oninput = (event) => { state.runSearch = event.target.value; renderRuns() }
+  bindSearch('run-search', (value) => { state.runSearch = value; renderRuns() })
   byId('run-agent-filter').onchange = (event) => { state.runAgent = event.target.value; renderRuns() }
   byId('run-status-filter').onchange = (event) => { state.runStatus = event.target.value; renderRuns() }
 }
@@ -161,6 +167,16 @@ function agentRow(agent, live) {
 
 function renderAgents() {
   actions.innerHTML = '<button id="refresh-agents" class="button">' + icons.refresh + '刷新</button><button id="add-agent" class="button primary">' + icons.plus + '添加智能体</button>'
+  byId('refresh-agents').onclick = () => refreshReadiness(true)
+  byId('add-agent').onclick = () => openAgentDrawer()
+
+  if (!state.config.agents.length) {
+    content.innerHTML = '<div class="panel">' +
+      emptyState(icons.robot, '尚未配置智能体', '智能体是网关转发任务的执行端，支持本地 ACP 进程与远程 A2A 服务。', { action: 'add-agent', label: '添加智能体' }) +
+      '</div>'
+    return
+  }
+
   const readiness = new Map(state.readiness.map((agent) => [agent.id, agent]))
   const rows = state.config.agents.filter((agent) => {
     const live = readiness.get(agent.id) || {}
@@ -177,22 +193,31 @@ function renderAgents() {
     '<div class="table-wrap"><table><thead><tr><th>智能体</th><th>协议</th><th>驱动</th><th>状态</th><th>工作区</th><th>权限策略</th><th></th></tr></thead><tbody>' +
     (rows.length ? rows.map((agent) => agentRow(agent, readiness.get(agent.id))).join('') : '<tr><td colspan="7" class="empty">没有符合条件的智能体。</td></tr>') +
     '</tbody></table></div>'
-  byId('agent-search').oninput = (event) => { state.search = event.target.value; renderAgents() }
+  bindSearch('agent-search', (value) => { state.search = value; renderAgents() })
   byId('protocol-filter').onchange = (event) => { state.protocol = event.target.value; renderAgents() }
   byId('status-filter').onchange = (event) => { state.status = event.target.value; renderAgents() }
-  byId('refresh-agents').onclick = () => refreshReadiness(true)
-  byId('add-agent').onclick = () => openAgentDrawer()
 }
 
 /* ── Workspaces ───────────────────────────────────────────────────── */
 
+function workspaceRow(root, index, total) {
+  const usedBy = state.config.agents.filter((agent) => agent.workspace === root).map((agent) => escapeHtml(agent.name))
+  return '<div class="list-row"><div class="list-row-main"><strong class="path">' + escapeHtml(root) + '</strong>' +
+    '<small>' + (usedBy.length ? '使用中：' + usedBy.join('、') : '没有智能体使用') + '</small></div>' +
+    '<div class="row-actions"><button class="button small" data-workspace-edit="' + index + '">编辑</button>' +
+    '<button class="button small danger" data-workspace-delete="' + index + '"' +
+    (total === 1 ? ' disabled title="至少保留一个根目录"' : '') + '>删除</button></div></div>'
+}
+
 function renderWorkspaces() {
   actions.innerHTML = '<button id="add-workspace" class="button primary">' + icons.plus + '添加工作区</button>'
-  const roots = state.config.workspaceRoots || []
-  content.innerHTML = '<div class="workspace-list">' +
-    roots.map((root, index) => '<div class="list-row"><div class="list-row-main"><strong class="path">' + escapeHtml(root) + '</strong></div><div class="row-actions"><button class="button small" data-workspace-edit="' + index + '">编辑</button><button class="button small danger" data-workspace-delete="' + index + '"' + (roots.length === 1 ? ' disabled' : '') + '>删除</button></div></div>').join('') +
-    '</div>'
   byId('add-workspace').onclick = () => openWorkspaceDrawer()
+  const roots = state.config.workspaceRoots || []
+  content.innerHTML = '<div class="panel"><div class="panel-header"><h2>允许的根目录</h2><span class="muted">' + roots.length + ' 个</span></div>' +
+    (roots.length
+      ? '<div class="panel-body workspace-list">' + roots.map((root, index) => workspaceRow(root, index, roots.length)).join('') + '</div>'
+      : emptyState(icons.folder, '尚未配置工作区', '', { action: 'add-workspace', label: '添加工作区' })) +
+    '</div>'
 }
 
 /* ── API keys ─────────────────────────────────────────────────────── */
@@ -215,12 +240,26 @@ function renderApiKeys() {
   actions.innerHTML = '<button id="create-key" class="button primary">' + icons.plus + '创建 API 密钥</button>'
   content.innerHTML = state.apiKeys.length
     ? '<div class="table-wrap key-table-wrap"><table class="key-table"><thead><tr><th>名称</th><th>状态</th><th>API 密钥</th><th>授权范围</th><th>最后使用</th><th>操作</th></tr></thead><tbody>' + state.apiKeys.map(keyRow).join('') + '</tbody></table></div>'
-    : '<div class="panel">' + emptyState(icons.key, '尚未创建 API 密钥', '客户端需要访问网关数据接口时再创建即可。') + '</div>'
+    : '<div class="panel">' + emptyState(icons.key, '尚未创建 API 密钥', '客户端调用网关数据接口时需要携带密钥。', { action: 'create-key', label: '创建 API 密钥' }) + '</div>'
   byId('create-key').onclick = () => openKeyDrawer()
 }
 
-function emptyState(icon, title, text) {
-  return '<div class="empty-state">' + icon + '<strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(text) + '</span></div>'
+function emptyState(icon, title, text, cta) {
+  return '<div class="empty-state">' + icon + '<strong>' + escapeHtml(title) + '</strong>' +
+    (text ? '<span>' + escapeHtml(text) + '</span>' : '') +
+    (cta ? '<button type="button" class="button primary" data-empty-action="' + escapeHtml(cta.action) + '">' + icons.plus + escapeHtml(cta.label) + '</button>' : '') +
+    '</div>'
+}
+
+/* 重渲染会销毁输入框，必须把焦点和光标还给新建的那个，否则每敲一个字就失焦 */
+function bindSearch(id, apply) {
+  byId(id).oninput = (event) => {
+    const caret = event.target.selectionStart
+    apply(event.target.value)
+    const next = byId(id)
+    next.focus()
+    next.setSelectionRange(caret, caret)
+  }
 }
 
 /* ── Settings ─────────────────────────────────────────────────────── */
@@ -229,14 +268,14 @@ function renderSettings() {
   const sessionTtlHours = Math.round((state.config.sessionTtlMs || 24 * 60 * 60 * 1000) / 3_600_000)
   const promptTimeoutMinutes = Math.round((state.config.promptTimeoutMs || 30 * 60 * 1000) / 60_000)
   const cleanupIntervalSeconds = Math.round((state.config.cleanupIntervalMs || 60_000) / 1000)
-  actions.innerHTML = '<span class="muted">修改后立即生效，新任务按新参数执行</span>'
+  actions.innerHTML = ''
   content.innerHTML =
-    '<div class="settings-layout"><section class="panel settings-form"><div class="panel-header"><div><h2>运行生命周期</h2><p class="settings-subtitle">这些参数由网关统一管理，重启后仍会保留。</p></div></div>' +
+    '<div class="settings-layout"><section class="panel settings-form"><div class="panel-header"><h2>运行生命周期</h2></div>' +
     '<div class="settings-fields">' +
-    '<div class="field"><label for="session-ttl-hours">Session 空闲有效期（小时）</label><input id="session-ttl-hours" type="number" min="1" max="720" step="1" value="' + escapeHtml(sessionTtlHours) + '"><small class="field-help">Session 在没有新消息、授权或输入交互后，超过此时间会被释放。默认 24 小时。</small></div>' +
-    '<div class="field"><label for="prompt-timeout-minutes">单次 ACP 任务超时（分钟）</label><input id="prompt-timeout-minutes" type="number" min="1" max="1440" step="1" value="' + escapeHtml(promptTimeoutMinutes) + '"><small class="field-help">单次 ACP prompt 的最长运行时间。默认 30 分钟；超时后任务会记录为失败并释放运行资源。</small></div>' +
-    '<div class="field"><label for="cleanup-interval-seconds">清理任务周期（秒）</label><input id="cleanup-interval-seconds" type="number" min="5" max="3600" step="1" value="' + escapeHtml(cleanupIntervalSeconds) + '"><small class="field-help">网关扫描空闲 Session、过期运行记录和临时输入文件的间隔。默认每 60 秒执行一次。</small></div>' +
-    '</div><div class="settings-divider"></div><div class="settings-note"><strong>A2A 请求超时</strong><span>在“智能体 → 编辑 → A2A → 请求超时”中单独配置。默认 60 秒，最大 30 分钟，不受 ACP 全局任务超时字段覆盖。</span></div><div class="settings-actions"><button id="save-runtime-settings" class="button primary">保存运行设置</button></div></section></div>'
+    '<div class="field"><label for="session-ttl-hours">Session 空闲有效期（小时）</label><input id="session-ttl-hours" type="number" min="1" max="720" step="1" value="' + escapeHtml(sessionTtlHours) + '"><small class="field-help">无活动超过该时长后释放 Session。默认 24 小时。</small></div>' +
+    '<div class="field"><label for="prompt-timeout-minutes">单次 ACP 任务超时（分钟）</label><input id="prompt-timeout-minutes" type="number" min="1" max="1440" step="1" value="' + escapeHtml(promptTimeoutMinutes) + '"><small class="field-help">超时后任务记为失败并释放资源。默认 30 分钟。</small></div>' +
+    '<div class="field"><label for="cleanup-interval-seconds">清理任务周期（秒）</label><input id="cleanup-interval-seconds" type="number" min="5" max="3600" step="1" value="' + escapeHtml(cleanupIntervalSeconds) + '"><small class="field-help">扫描空闲 Session 与过期记录的间隔。默认 60 秒。</small></div>' +
+    '</div><div class="settings-actions"><button id="save-runtime-settings" class="button primary">保存运行设置</button></div></section></div>'
   byId('save-runtime-settings').onclick = async () => {
     const values = {
       sessionTtlMs: Number(byId('session-ttl-hours').value) * 3_600_000,
@@ -269,8 +308,8 @@ export function openAgentDrawer(agent) {
     '<div class="field-row"><div class="field"><label for="f-protocol">协议</label><select id="f-protocol" name="protocol"><option value="acp"' + selected(current.protocol, 'acp') + '>ACP</option><option value="a2a"' + selected(current.protocol, 'a2a') + '>A2A</option></select></div><div class="field"><label>&nbsp;</label><label class="checkbox"><input name="enabled" type="checkbox"' + checked(current.enabled) + '>启用</label></div></div>' +
     '<div class="field"><label for="f-name">名称</label><input id="f-name" name="name" value="' + escapeHtml(current.name || '') + '" required></div>' +
     '<div class="field"><label for="f-description">描述</label><textarea id="f-description" name="description">' + escapeHtml(current.description || '') + '</textarea></div>' +
-    '<div data-protocol-section="acp"><div class="field"><label for="f-driver">驱动</label><select id="f-driver" name="driver">' + drivers + '</select></div><div class="field"><label for="f-workspace">工作区</label><input id="f-workspace" name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></div><div class="field-row"><div class="field"><label for="f-permissionPolicy">权限策略</label><select id="f-permissionPolicy" name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="allow"' + selected(current.permissionPolicy, 'allow') + '>始终允许</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></div><div class="field"><label for="f-permissionTimeoutMs">权限确认超时（秒）</label><input id="f-permissionTimeoutMs" name="permissionTimeoutMs" type="number" min="1" max="86400" step="1" value="' + escapeHtml(permissionTimeoutSeconds) + '"><small class="field-help">默认 900 秒，最长 24 小时；“始终允许”不会等待确认。</small></div></div></div>' +
-    '<div data-protocol-section="a2a"><div class="field"><label for="f-agentCardUrl">Agent Card URL</label><input id="f-agentCardUrl" name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">填写完整的 Agent Card JSON 地址；调用地址和能力将从 Card 自动发现。</small></div><div class="field-row"><div class="field"><label for="f-preferredTransport">首选传输</label><select id="f-preferredTransport" name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></div><div class="field"><label for="f-authType">认证方式</label><select id="f-authType" name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></div></div><div class="field" data-auth-header><label for="f-authHeaderName">请求头名称</label><input id="f-authHeaderName" name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></div><div class="field" data-auth-value><label data-auth-value-label for="f-authValue">认证凭据</label><input id="f-authValue" name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></div><div class="field"><label for="f-timeoutMs">请求超时（秒）</label><input id="f-timeoutMs" name="timeoutMs" type="number" min="1" max="1800" step="1" value="' + escapeHtml(requestTimeoutSeconds) + '"><small class="field-help">默认 60 秒；限制这个 A2A Agent 的单次请求，最大 1800 秒（30 分钟）。</small></div></div>'
+    '<div data-protocol-section="acp"><div class="field"><label for="f-driver">驱动</label><select id="f-driver" name="driver">' + drivers + '</select></div><div class="field"><label for="f-workspace">工作区</label><input id="f-workspace" name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></div><div class="field-row"><div class="field"><label for="f-permissionPolicy">权限策略</label><select id="f-permissionPolicy" name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="allow"' + selected(current.permissionPolicy, 'allow') + '>始终允许</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></div><div class="field"><label for="f-permissionTimeoutMs">权限确认超时（秒）</label><input id="f-permissionTimeoutMs" name="permissionTimeoutMs" type="number" min="1" max="86400" step="1" value="' + escapeHtml(permissionTimeoutSeconds) + '"><small class="field-help">默认 900 秒，最长 24 小时；选择「始终允许」时不生效。</small></div></div></div>' +
+    '<div data-protocol-section="a2a"><div class="field"><label for="f-agentCardUrl">Agent Card URL</label><input id="f-agentCardUrl" name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">调用地址与能力从 Card 自动发现。</small></div><div class="field-row"><div class="field"><label for="f-preferredTransport">首选传输</label><select id="f-preferredTransport" name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></div><div class="field"><label for="f-authType">认证方式</label><select id="f-authType" name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></div></div><div class="field" data-auth-header><label for="f-authHeaderName">请求头名称</label><input id="f-authHeaderName" name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></div><div class="field" data-auth-value><label data-auth-value-label for="f-authValue">认证凭据</label><input id="f-authValue" name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></div><div class="field"><label for="f-timeoutMs">请求超时（秒）</label><input id="f-timeoutMs" name="timeoutMs" type="number" min="1" max="1800" step="1" value="' + escapeHtml(requestTimeoutSeconds) + '"><small class="field-help">单次请求上限。默认 60 秒，最大 1800 秒。</small></div></div>'
   openDrawer(editing ? '编辑智能体' : '添加智能体', body, editing ? '保存修改' : '添加智能体', async (form) => {
     const data = new FormData(form)
     const protocol = data.get('protocol')
@@ -366,7 +405,7 @@ export function openKeyDrawer() {
 }
 
 export function showSecret(title, secret) {
-  openDrawer(title, '<div class="secret-box"><span class="muted">请立即复制此密钥；之后也可在 API 密钥页面再次显示。</span><code class="secret-value">' + escapeHtml(secret) + '</code><button class="button" type="button" id="copy-secret">' + icons.copy + '复制</button></div>', '', null)
+  openDrawer(title, '<div class="secret-box"><span class="muted">请立即复制；之后可在密钥列表中再次显示。</span><code class="secret-value">' + escapeHtml(secret) + '</code><button class="button" type="button" id="copy-secret">' + icons.copy + '复制</button></div>', '', null)
   byId('copy-secret').onclick = async () => {
     try {
       await copySecret(secret)
@@ -421,6 +460,19 @@ export function openKeyScopeDrawer(key) {
   })
   const all = byId('edit-all-agents')
   all.onchange = () => byId('edit-agent-scope').classList.toggle('hidden', all.checked)
+}
+
+export function openRenameKeyDrawer(key) {
+  openDrawer('重命名 API 密钥', '<div class="field"><label for="f-key-name">名称</label><input id="f-key-name" name="name" value="' + escapeHtml(key.name) + '" required autocomplete="off"></div>', '保存名称', async (form) => {
+    const name = String(new FormData(form).get('name') || '').trim()
+    if (name === key.name) { closeDrawer(); return }
+    await api('/v1/admin/api-keys/' + encodeURIComponent(key.id), { method: 'PATCH', body: { name } })
+    closeDrawer()
+    await reloadKeys()
+    toast('API 密钥已重命名')
+  })
+  const input = byId('f-key-name')
+  if (input) setTimeout(() => input.select(), 0)
 }
 
 export async function reloadKeys() {

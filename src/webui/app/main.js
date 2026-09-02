@@ -5,14 +5,16 @@ import { toast, runAction } from './toast.js'
 import { boot, enterApp, showLogin } from './screens.js'
 import { applyTheme } from './theme.js'
 import { loadAll, refreshRuns, refreshReadiness } from './data.js'
-import { closeDrawer, getDrawerSubmit } from './drawer.js'
+import { closeDrawer, getDrawerSubmit, openConfirmDrawer } from './drawer.js'
 import {
   render,
   openRunDrawer,
   openAgentDrawer,
   openWorkspaceDrawer,
   openPasswordDrawer,
+  openKeyDrawer,
   openKeyScopeDrawer,
+  openRenameKeyDrawer,
   showSecret,
   copySecret,
   reloadKeys,
@@ -20,10 +22,30 @@ import {
   closeKeyActionMenu
 } from './render.js'
 
-async function handleKeyAction(action, id) {
+function handleKeyAction(action, id) {
   const key = state.apiKeys.find((item) => item.id === id)
   if (!key) return
-  await runAction(async () => {
+  if (action === 'rename') {
+    openRenameKeyDrawer(key)
+    return
+  }
+  if (action === 'regenerate') {
+    openConfirmDrawer('重新生成 API 密钥', '当前密钥会立即失效，使用它的客户端必须改用新密钥。', '重新生成', async () => {
+      const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/regenerate', { method: 'POST' })
+      await reloadKeys()
+      showSecret('API 密钥已重新生成', value.secret)
+    })
+    return
+  }
+  if (action === 'delete') {
+    openConfirmDrawer('删除 API 密钥', '使用该密钥的客户端会立即失去访问权限，此操作无法撤销。', '删除密钥', async () => {
+      await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'DELETE' })
+      await reloadKeys()
+      toast('API 密钥已删除')
+    })
+    return
+  }
+  void runAction(async () => {
     if (action === 'copy') {
       const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/reveal', { method: 'POST' })
       await copySecret(value.secret)
@@ -33,32 +55,11 @@ async function handleKeyAction(action, id) {
       const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/reveal', { method: 'POST' })
       showSecret('显示 API 密钥', value.secret)
     }
-    if (action === 'rename') {
-      const name = prompt('API 密钥名称', key.name)
-      if (!name || name === key.name) return
-      await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'PATCH', body: { name } })
-      await reloadKeys()
-      toast('API 密钥已重命名')
-    }
-    if (action === 'scope') {
-      openKeyScopeDrawer(key)
-    }
+    if (action === 'scope') openKeyScopeDrawer(key)
     if (action === 'toggle') {
       await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled: !key.enabled } })
       await reloadKeys()
       toast(key.enabled ? 'API 密钥已禁用' : 'API 密钥已启用')
-    }
-    if (action === 'regenerate') {
-      if (!confirm('确定重新生成此 API 密钥吗？当前密钥将立即失效。')) return
-      const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/regenerate', { method: 'POST' })
-      await reloadKeys()
-      showSecret('API 密钥已重新生成', value.secret)
-    }
-    if (action === 'delete') {
-      if (!confirm('确定删除此 API 密钥吗？此操作无法撤销。')) return
-      await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'DELETE' })
-      await reloadKeys()
-      toast('API 密钥已删除')
     }
   })
 }
@@ -71,6 +72,12 @@ async function handleContentClick(event) {
   }
   const button = event.target.closest('button')
   if (!button) return
+  if (button.dataset.emptyAction) {
+    if (button.dataset.emptyAction === 'add-agent') openAgentDrawer()
+    if (button.dataset.emptyAction === 'create-key') openKeyDrawer()
+    if (button.dataset.emptyAction === 'add-workspace') openWorkspaceDrawer()
+    return
+  }
   if (button.dataset.keyMenu) {
     toggleKeyActionMenu(button, button.dataset.keyMenu)
     return
@@ -80,9 +87,9 @@ async function handleContentClick(event) {
     return
   }
   if (button.dataset.agentDelete) {
-    if (!confirm('确定删除此智能体吗？已有会话不会被修改。')) return
-    await runAction(async () => {
-      state.config = await api('/v1/admin/agents/' + encodeURIComponent(button.dataset.agentDelete), { method: 'DELETE' })
+    const id = button.dataset.agentDelete
+    openConfirmDrawer('删除智能体', '删除后该智能体不再接受新任务，已有会话不受影响。', '删除智能体', async () => {
+      state.config = await api('/v1/admin/agents/' + encodeURIComponent(id), { method: 'DELETE' })
       await loadAll(true)
       render()
       toast('智能体已删除')
@@ -95,8 +102,8 @@ async function handleContentClick(event) {
   }
   if (button.dataset.workspaceDelete !== undefined) {
     const index = Number(button.dataset.workspaceDelete)
-    if (!confirm('确定移除此工作区根目录吗？')) return
-    await runAction(async () => {
+    const root = (state.config.workspaceRoots || [])[index] || ''
+    openConfirmDrawer('移除工作区', '移除后智能体将无法再访问 ' + root + '。', '移除根目录', async () => {
       const roots = state.config.workspaceRoots.filter((_, itemIndex) => itemIndex !== index)
       state.config = await api('/v1/admin/config/workspace-roots', { method: 'PUT', body: { workspaceRoots: roots } })
       render()
@@ -104,7 +111,7 @@ async function handleContentClick(event) {
     })
     return
   }
-  if (button.dataset.keyAction) await handleKeyAction(button.dataset.keyAction, button.dataset.keyId)
+  if (button.dataset.keyAction) handleKeyAction(button.dataset.keyAction, button.dataset.keyId)
 }
 
 /* ── Auth forms ───────────────────────────────────────────────────── */

@@ -37,7 +37,7 @@ export async function refreshReadiness(showNotice) {
     const overview = await api('/v1/admin/overview?refresh=1')
     state.readiness = overview.agents || []
     state.sessions = overview.sessions || 0
-    render()
+    if (state.page === 'overview' || state.page === 'agents') render()
     if (showNotice) toast('运行状态已刷新')
   } catch (error) {
     if (showNotice) toast(error.message, true)

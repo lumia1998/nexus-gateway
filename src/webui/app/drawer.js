@@ -1,12 +1,13 @@
 import { byId, drawer, drawerBackdrop, drawerForm, drawerFooter, escapeHtml } from './dom.js'
+import { runAction } from './toast.js'
 
 let drawerSubmit = null
 
-export function openDrawer(title, body, submitLabel, onSubmit) {
+export function openDrawer(title, body, submitLabel, onSubmit, danger) {
   byId('drawer-title').textContent = title
   drawerForm.innerHTML = body + '<p class="form-error" data-form-error></p>'
   drawerFooter.innerHTML = '<button type="button" class="button" data-close-drawer>取消</button>' +
-    (submitLabel ? '<button type="submit" form="drawer-form" class="button primary">' + escapeHtml(submitLabel) + '</button>' : '')
+    (submitLabel ? '<button type="submit" form="drawer-form" class="button ' + (danger ? 'solid-danger' : 'primary') + '">' + escapeHtml(submitLabel) + '</button>' : '')
   drawerSubmit = onSubmit || null
   drawer.classList.remove('hidden')
   drawerBackdrop.classList.remove('hidden')
@@ -20,6 +21,15 @@ export function closeDrawer() {
   drawerForm.innerHTML = ''
   drawerFooter.innerHTML = ''
   drawerSubmit = null
+}
+
+export function openConfirmDrawer(title, message, confirmLabel, onConfirm) {
+  openDrawer(title, '<p class="confirm-text">' + escapeHtml(message) + '</p>', confirmLabel, async () => {
+    closeDrawer()
+    await runAction(onConfirm)
+  }, true)
+  const cancel = drawerFooter.querySelector('[data-close-drawer]')
+  if (cancel) setTimeout(() => cancel.focus(), 0)
 }
 
 export function getDrawerSubmit() {
