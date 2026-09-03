@@ -61,6 +61,8 @@ export function localizeError(message) {
     'Internal server error': '服务器内部错误'
   }
   if (messages[message]) return messages[message]
+  const workspaceConflict = /^Workspace change would exclude agent: (.+)$/.exec(message)
+  if (workspaceConflict) return '请先修改智能体「' + workspaceConflict[1] + '」的工作区，再删除或编辑此工作区'
   const missingAgent = /^Configured agent not found: (.+)$/.exec(message)
   if (missingAgent) return '未找到已配置的智能体：' + missingAgent[1]
   const timeout = /^timeout must be between (\d+) and (\d+)$/.exec(message)
@@ -68,7 +70,7 @@ export function localizeError(message) {
   const runtimeRange = /^(sessionTtlMs|promptTimeoutMs|cleanupIntervalMs) must be between (\d+) and (\d+)$/.exec(message)
   if (runtimeRange) {
     const units = {
-      sessionTtlMs: ['Session 空闲有效期', '小时', 3_600_000],
+      sessionTtlMs: ['会话空闲有效期', '小时', 3_600_000],
       promptTimeoutMs: ['ACP 任务超时', '分钟', 60_000],
       cleanupIntervalMs: ['清理任务周期', '秒', 1000]
     }
@@ -77,4 +79,3 @@ export function localizeError(message) {
   }
   return message
 }
-

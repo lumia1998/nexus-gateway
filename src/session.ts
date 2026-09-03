@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { open, realpath } from 'node:fs/promises'
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { realpath } from 'node:fs/promises'
+import { extname } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime, probeA2AAgent } from './a2a/runtime.js'
 import type { AgentDriver } from './drivers/index.js'
@@ -28,7 +28,11 @@ import type {
     AgentdTurnCompletion,
     AgentdTurnCompletionProof
 } from './types.js'
-import type { WorkspacePolicy } from './workspace.js'
+import {
+    ContainedReadError,
+    readContainedFile,
+    type WorkspacePolicy
+} from './workspace.js'
 
 const MAX_SESSION_ARTIFACTS = 64
 const MAX_ARTIFACT_BASE64_CHARS = 16 * 1024 * 1024
@@ -238,48 +242,21 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     }
 
     private async publishSingleFile(requestedPath: string) {
-        let handle: Awaited<ReturnType<typeof open>> | undefined
         try {
             const workspaceRoot = await realpath(this.workspace!)
-            const unresolved = resolve(workspaceRoot, requestedPath)
-            const target = await realpath(unresolved)
-            assertWorkspacePath(workspaceRoot, target)
-
-            handle = await open(target, 'r')
-            // Resolve again after opening so a swapped symlink cannot silently
-            // redirect a publish request outside the configured workspace.
-            const verifiedTarget = await realpath(unresolved)
-            assertWorkspacePath(workspaceRoot, verifiedTarget)
-            if (verifiedTarget !== target) {
-                throw new SessionRequestError(
-                    409,
-                    'Published file changed while it was being opened'
-                )
-            }
-
-            const stats = await handle.stat()
-            if (!stats.isFile()) {
-                throw new SessionRequestError(400, 'Only regular files can be published')
-            }
-            if (stats.size > MAX_PUBLISHED_FILE_BYTES) {
-                throw new SessionRequestError(
-                    413,
-                    `Published file exceeds the ${MAX_PUBLISHED_FILE_BYTES} byte limit`
-                )
-            }
-            const bytes = await handle.readFile()
-            const filename = basename(verifiedTarget)
-            const workspacePath = relative(workspaceRoot, verifiedTarget).split(sep).join('/')
+            const file = await readContainedFile([workspaceRoot], requestedPath, {
+                maxBytes: MAX_PUBLISHED_FILE_BYTES
+            })
             const artifact: AgentdArtifact = {
                 id: `published:${randomUUID()}`,
-                name: filename,
-                filename,
-                mediaType: mediaTypeForPath(filename),
-                bytesBase64: bytes.toString('base64'),
+                name: file.filename,
+                filename: file.filename,
+                mediaType: mediaTypeForPath(file.filename),
+                bytesBase64: file.bytes.toString('base64'),
                 metadata: {
                     source: 'workspace_publish',
-                    path: workspacePath,
-                    size: bytes.length
+                    path: file.relative,
+                    size: file.size
                 }
             }
             this.addArtifact(artifact)
@@ -287,6 +264,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             return artifact
         } catch (error) {
             if (error instanceof SessionRequestError) throw error
+            if (error instanceof ContainedReadError) throw publishFailure(error)
             const code = (error as NodeJS.ErrnoException)?.code
             if (code === 'ENOENT') {
                 throw new SessionRequestError(404, 'Published file was not found')
@@ -295,8 +273,6 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
                 throw new SessionRequestError(403, 'Published file cannot be read')
             }
             throw error
-        } finally {
-            await handle?.close()
         }
     }
 
@@ -361,7 +337,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     }
 
     async message(message: string, attachmentIds: string[] = []) {
-        if (!this.runtime) throw new SessionRequestError(409, 'Agent runtime is unavailable')
+        if (!this.runtime || this.runtime.isAvailable?.() === false) throw new SessionRequestError(409, 'Agent runtime is unavailable')
         const attachments = this.inputAttachmentsFor(attachmentIds)
         if (this.pendingRequest) {
             await this.resolvePending(
@@ -392,6 +368,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             task: message,
             inputAttachmentCount: attachments.length
         }).id
+        this.setState('running')
         void this.runtime.prompt(message, attachments).catch((error) => {
             if (this.state !== 'canceled') this.setState('failed', errorMessage(error))
         })
@@ -401,7 +378,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         response: AgentdPendingResponse,
         attachmentIds: string[] = []
     ) {
-        if (!this.runtime) {
+        if (!this.runtime || this.runtime.isAvailable?.() === false) {
             throw new SessionRequestError(409, 'Agent runtime is unavailable')
         }
         const pending = this.pendingRequest
@@ -422,12 +399,19 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     }
 
     async cancel() {
-        await this.runtime?.cancel()
+        const runtime = this.runtime
+        this.runtime = undefined
+        this.clearPending()
+        this.setState('canceled')
+        try { await runtime?.cancel() } finally {
+            try { await runtime?.dispose() } finally { this.inputAttachments.clear() }
+        }
     }
 
     async dispose() {
-        await this.runtime?.dispose()
-        this.inputAttachments.clear()
+        const runtime = this.runtime
+        this.runtime = undefined
+        try { await runtime?.dispose() } finally { this.inputAttachments.clear() }
     }
 
     snapshot(): AgentdSessionView {
@@ -638,7 +622,8 @@ export class SessionManager {
                       driver!,
                       session,
                       this.config.maxOutputChars,
-                      this.config.promptTimeoutMs || 30 * 60_000
+                      this.config.promptTimeoutMs || 30 * 60_000,
+                      this.workspacePolicy.listRoots()
                   )
         this.sessions.set(session.id, session)
         session.attach(runtime)
@@ -647,8 +632,9 @@ export class SessionManager {
             return session.snapshot()
         } catch (error) {
             session.setState('failed', errorMessage(error))
-            await session.dispose()
-            this.sessions.delete(session.id)
+            try { await session.dispose() } catch (cleanupError) {
+                console.error(JSON.stringify({ level: 'error', event: 'session_start_cleanup_failed', sessionId: session.id, message: errorMessage(cleanupError) }))
+            } finally { this.sessions.delete(session.id) }
             throw new SessionRequestError(502, `Agent failed to start: ${errorMessage(error)}`)
         }
     }
@@ -666,7 +652,7 @@ export class SessionManager {
     }
 
     listRuns(query: RunListQuery = {}) {
-        return this.runStore?.list(query) || { runs: [], total: 0 }
+        return this.runStore?.list(query) || { runs: [], total: 0, stats: { active: 0, completed: 0, failed: 0 } }
     }
 
     getRun(id: string) {
@@ -801,18 +787,22 @@ export class SessionManager {
         const cutoff = Date.now() - this.config.sessionTtlMs
         for (const [id, session] of this.sessions) {
             if (session.updatedAt > cutoff) continue
-            if (!isTerminal(session.state)) {
-                session.setState('failed', 'Session expired after exceeding its lifetime')
-            }
-            await session.dispose()
-            this.sessions.delete(id)
+            await this.withSessionLock(id, async () => {
+                if (this.sessions.get(id) !== session || session.updatedAt > cutoff) return
+                if (!isTerminal(session.state)) session.setState('failed', 'Session expired after exceeding its lifetime')
+                try { await session.dispose() } catch (error) {
+                    console.error(JSON.stringify({ level: 'error', event: 'session_cleanup_failed', sessionId: id, message: errorMessage(error) }))
+                } finally { this.sessions.delete(id) }
+            })
         }
     }
 
     private restartCleanup() {
         if (this.cleanupTimer) clearInterval(this.cleanupTimer)
         this.cleanupTimer = setInterval(
-            () => void this.cleanup(),
+            () => void this.cleanup().catch((error) => {
+                console.error(JSON.stringify({ level: 'error', event: 'session_cleanup_failed', message: errorMessage(error) }))
+            }),
             this.config.cleanupIntervalMs || 60_000
         )
         this.cleanupTimer.unref?.()
@@ -884,13 +874,25 @@ function runArtifact(artifact: AgentdArtifact) {
     }
 }
 
-function assertWorkspacePath(workspaceRoot: string, target: string) {
-    const child = relative(workspaceRoot, target)
-    if (child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) {
-        throw new SessionRequestError(
-            403,
-            'Published files must stay inside the session workspace'
-        )
+function publishFailure(error: ContainedReadError) {
+    switch (error.failure) {
+        case 'swapped':
+            return new SessionRequestError(
+                409,
+                'Published file changed while it was being opened'
+            )
+        case 'not-a-file':
+            return new SessionRequestError(400, 'Only regular files can be published')
+        case 'too-large':
+            return new SessionRequestError(
+                413,
+                `Published file exceeds the ${MAX_PUBLISHED_FILE_BYTES} byte limit`
+            )
+        case 'outside':
+            return new SessionRequestError(
+                403,
+                'Published files must stay inside the session workspace'
+            )
     }
 }
 

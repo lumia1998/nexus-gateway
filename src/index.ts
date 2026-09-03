@@ -27,17 +27,31 @@ export async function startAgentd(configPath: string) {
     sessions.startCleanup()
     const controlPlane = new AgentdControlPlane(absoluteConfigPath, config, sessions)
     const server = createAgentdServer(config, sessions, controlPlane)
-    await listen(server, config.listen.port, config.listen.host)
+    let closing: Promise<void> | undefined
+    const close = () => closing ??= (async () => {
+        const results = await Promise.allSettled([closeServer(server), sessions.shutdown()])
+        await runStore.flush()
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failed) throw failed.reason
+    })()
+    try { await listen(server, config.listen.port, config.listen.host) } catch (error) {
+        await sessions.shutdown()
+        await runStore.flush()
+        throw error
+    }
+    server.on('error', (error) => {
+        console.error(JSON.stringify({ level: 'error', event: 'server_failed', message: error.message }))
+        void close().catch((closeError) => {
+            console.error(JSON.stringify({ level: 'error', event: 'server_shutdown_failed', message: String(closeError) }))
+        })
+    })
     return {
         config,
         server,
         sessions,
         runStore,
         controlPlane,
-        async close() {
-            await Promise.all([closeServer(server), sessions.shutdown()])
-            await runStore.flush()
-        }
+        close
     }
 }
 

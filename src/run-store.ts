@@ -203,8 +203,14 @@ export class RunStore {
                     run.id.toLowerCase().includes(needle)
             )
         const total = matched.length
+        const stats = { active: 0, completed: 0, failed: 0 }
+        for (const run of matched) {
+            if (isActive(run.state)) stats.active++
+            if (run.state === 'completed') stats.completed++
+            if (run.state === 'failed') stats.failed++
+        }
         const runs = matched.slice(0, limit).map(publicView)
-        return { runs, total }
+        return { runs, total, stats }
     }
 
     async flush() {

@@ -5,8 +5,10 @@ import { toast } from './toast.js'
 import { loadAll } from './data.js'
 import { render } from './render.js'
 import { applyTheme } from './theme.js'
+import { closeDrawer } from './drawer.js'
 
 function showOnly(element) {
+  byId('boot-screen').classList.add('hidden')
   setupScreen.classList.add('hidden')
   loginScreen.classList.add('hidden')
   appRoot.classList.add('hidden')
@@ -15,8 +17,10 @@ function showOnly(element) {
 
 export function showLogin() {
   state.authenticated = false
+  closeDrawer()
   showOnly(loginScreen)
   byId('login-form').reset()
+  byId('login-password').focus()
 }
 
 export async function boot() {
@@ -25,6 +29,7 @@ export async function boot() {
     const bootstrap = await api('/v1/bootstrap/status')
     if (bootstrap.adminSetupRequired) {
       showOnly(setupScreen)
+      byId('setup-password').focus()
       return
     }
     const auth = await api('/v1/admin/auth/status')
@@ -40,9 +45,14 @@ export async function boot() {
 }
 
 export async function enterApp() {
-  state.authenticated = true
-  showOnly(appRoot)
-  await loadAll()
-  render()
+  showOnly(byId('boot-screen'))
+  try {
+    await loadAll()
+    state.authenticated = true
+    showOnly(appRoot)
+    render()
+  } catch (error) {
+    showLogin()
+    throw error
+  }
 }
-

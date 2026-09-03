@@ -1,10 +1,12 @@
+const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })
+
 export function shortId(value) {
   return String(value || '').slice(0, 8)
 }
 
 export function formatDate(timestamp) {
   if (!timestamp) return '—'
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(timestamp))
+  return dateFormatter.format(new Date(timestamp))
 }
 
 export function formatDuration(run) {
@@ -35,4 +37,3 @@ export function permissionLabel(value) {
   if (value === 'deny') return '拒绝'
   return value || '—'
 }
-

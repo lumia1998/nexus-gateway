@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,6 +15,7 @@ import type {
     AgentdPendingResponse
 } from '../types.js'
 import { TURN_COMPLETION_CONTRACT } from '../completion-contract.js'
+import { readContainedFile } from '../workspace.js'
 
 interface PendingPermission {
     request: AgentdPendingRequest
@@ -35,7 +36,10 @@ type FormElicitation = acp.CreateElicitationRequest & {
     requestedSchema: acp.ElicitationSchema
 }
 
-const MAX_MEDIA_MARKER_FILE_BYTES = 32 * 1024 * 1024
+// Matches MAX_PUBLISHED_FILE_BYTES in session.ts; larger files are encoded only to be dropped by the base64 budget.
+const MAX_MEDIA_MARKER_FILE_BYTES = 12 * 1024 * 1024
+// The agent controls how many markers it emits, so bound the reads per turn.
+const MAX_MEDIA_MARKER_ARTIFACTS = 8
 
 export class AcpProcessRuntime {
     private process?: ChildProcessWithoutNullStreams
@@ -55,7 +59,9 @@ export class AcpProcessRuntime {
         private readonly driver: AgentDriver,
         private readonly sink: AcpSessionSink,
         maxStderrChunkChars = 16 * 1024,
-        promptTimeoutMs = 30 * 60 * 1000
+        promptTimeoutMs = 30 * 60 * 1000,
+        private readonly allowedRoots: readonly string[] = [],
+        private readonly startupTimeoutMs = 30_000
     ) {
         const limit = Number.isFinite(maxStderrChunkChars)
             ? Math.floor(maxStderrChunkChars)
@@ -65,6 +71,18 @@ export class AcpProcessRuntime {
     }
 
     async start(workspace: string) {
+        if (this.disposed) throw new Error('ACP runtime is disposed')
+        if (this.process) throw new Error('ACP runtime is already started')
+        try {
+            await withTimeout(this.connect(workspace), this.startupTimeoutMs, 'ACP startup timed out')
+        } catch (error) {
+            if (this.sink.state !== 'canceled') this.onProcessFailure(error)
+            await this.dispose()
+            throw error
+        }
+    }
+
+    private async connect(workspace: string) {
         if (this.process) throw new Error('ACP runtime is already started')
         this.workspace = workspace
         this.inputDirectory = path.join(workspace, '.nexus-inputs', this.sink.id)
@@ -114,6 +132,7 @@ export class AcpProcessRuntime {
                 }
             }
         )
+        if (this.disposed) throw new Error('ACP runtime is disposed')
         if (initialize.protocolVersion !== acp.PROTOCOL_VERSION) {
             this.sink.emit('terminal_output', {
                 stream: 'system',
@@ -128,11 +147,13 @@ export class AcpProcessRuntime {
                 mcpServers: []
             }
         )
+        if (this.disposed) throw new Error('ACP runtime is disposed')
         this.sink.setAcpSessionId(String(session.sessionId))
         this.sink.setState('created')
     }
 
     async prompt(message: string, attachments: AgentdInputAttachment[] = []) {
+        if (this.disposed) throw new Error('ACP runtime is disposed')
         if (!this.connection) throw new Error('ACP runtime is not connected')
         if (this.prompting) throw new Error('ACP session is already processing a prompt')
         const sessionId = this.requireSessionId()
@@ -271,11 +292,12 @@ export class AcpProcessRuntime {
         if (this.pendingInput) {
             this.finishInput('cancel')
         }
-        if (this.connection && this.sink.state !== 'canceled') {
+        this.sink.setState('canceled')
+        if (this.connection) {
             try {
-                await this.connection.agent.notify(acp.methods.agent.session.cancel, {
+                await withTimeout(this.connection.agent.notify(acp.methods.agent.session.cancel, {
                     sessionId: this.requireSessionId()
-                })
+                }), 2_000, 'ACP cancellation notification timed out')
             } catch (error) {
                 this.sink.emit('terminal_output', {
                     stream: 'system',
@@ -302,8 +324,13 @@ export class AcpProcessRuntime {
             this.pendingInput.resolve({ action: 'cancel' })
             this.pendingInput = undefined
         }
-        this.connection?.close()
+        const connection = this.connection
         this.connection = undefined
+        try { connection?.close() } catch (error) {
+            this.sink.emit('terminal_output', {
+                stream: 'system', text: `ACP connection close failed: ${error instanceof Error ? error.message : String(error)}`
+            })
+        }
         const child = this.process
         this.process = undefined
         if (child) {
@@ -315,6 +342,11 @@ export class AcpProcessRuntime {
             await rm(this.inputDirectory, { recursive: true, force: true }).catch(() => undefined)
             this.inputDirectory = undefined
         }
+    }
+
+    isAvailable() {
+        return !this.disposed && Boolean(this.connection) &&
+            (!this.process || (this.process.exitCode === null && this.process.signalCode === null))
     }
 
     private requestPermission(
@@ -539,15 +571,26 @@ export class AcpProcessRuntime {
         const markers = mediaMarkers(this.promptOutput)
         if (!markers.length) return
         this.sink.replaceOutput(withoutMediaMarkers(this.promptOutput))
-        const seen = new Set<string>()
-        for (const marker of markers) {
-            if (seen.has(marker)) continue
-            seen.add(marker)
+        const roots = this.allowedRoots.length
+            ? this.allowedRoots
+            : this.workspace
+              ? [this.workspace]
+              : []
+        const unique = Array.from(new Set(markers))
+        const accepted = unique.slice(0, MAX_MEDIA_MARKER_ARTIFACTS)
+        const ignored = unique.length - accepted.length
+        if (ignored > 0) {
+            this.sink.emit('terminal_output', {
+                stream: 'system',
+                text: `Ignored ${ignored} MEDIA marker(s); at most ${MAX_MEDIA_MARKER_ARTIFACTS} artifacts can be attached per turn.`
+            })
+        }
+        for (const marker of accepted) {
             try {
                 const artifact = await artifactFromMediaMarker(
                     marker,
                     `media:${randomUUID()}`,
-                    this.workspace
+                    roots
                 )
                 this.sink.addArtifact(artifact)
                 this.sink.emit('artifact', artifact)
@@ -848,7 +891,7 @@ function withoutMediaMarkers(output: string) {
 async function artifactFromMediaMarker(
     marker: string,
     id: string,
-    workspace?: string
+    roots: readonly string[]
 ): Promise<AgentdArtifact> {
     if (/^https?:\/\//i.test(marker)) {
         const filename = artifactFilename(marker, undefined, 'resource', undefined)
@@ -861,33 +904,19 @@ async function artifactFromMediaMarker(
         }
     }
 
-    const localPath = marker.startsWith('file:')
-        ? fileURLToPath(marker)
-        : marker
-    const resolved = await realpath(
-        path.isAbsolute(localPath)
-            ? localPath
-            : path.resolve(workspace || process.cwd(), localPath)
-    )
-    const details = await stat(resolved)
-    if (!details.isFile()) {
-        throw new Error('declared path is not a regular file')
-    }
-    if (details.size > MAX_MEDIA_MARKER_FILE_BYTES) {
-        throw new Error(
-            `declared file exceeds the ${MAX_MEDIA_MARKER_FILE_BYTES} byte limit`
-        )
-    }
-    const filename = path.basename(resolved)
+    const localPath = marker.startsWith('file:') ? fileURLToPath(marker) : marker
+    const file = await readContainedFile(roots, localPath, {
+        maxBytes: MAX_MEDIA_MARKER_FILE_BYTES
+    })
     return {
         id,
-        name: filename,
-        filename,
-        mediaType: mediaTypeForPath(filename),
-        bytesBase64: (await readFile(resolved)).toString('base64'),
+        name: file.filename,
+        filename: file.filename,
+        mediaType: mediaTypeForPath(file.filename),
+        bytesBase64: file.bytes.toString('base64'),
         metadata: {
             source: 'acp_media_marker',
-            size: details.size
+            size: file.size
         }
     }
 }

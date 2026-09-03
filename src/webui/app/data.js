@@ -16,6 +16,7 @@ export async function loadAll(force) {
   state.sessions = values[2].sessions || 0
   state.runs = values[3].runs || []
   state.runTotal = values[3].total || 0
+  state.runStats = values[3].stats || { active: 0, completed: 0, failed: 0 }
 }
 
 export async function refreshRuns(showNotice) {
@@ -24,8 +25,8 @@ export async function refreshRuns(showNotice) {
     const value = await api('/v1/admin/runs?limit=200')
     state.runs = value.runs || []
     state.runTotal = value.total || 0
+    state.runStats = value.stats || { active: 0, completed: 0, failed: 0 }
     if (state.page === 'runs') renderRuns()
-    if (showNotice) toast('运行记录已刷新')
   } catch (error) {
     if (showNotice) toast(error.message, true)
   }
@@ -38,9 +39,7 @@ export async function refreshReadiness(showNotice) {
     state.readiness = overview.agents || []
     state.sessions = overview.sessions || 0
     if (state.page === 'overview' || state.page === 'agents') render()
-    if (showNotice) toast('运行状态已刷新')
   } catch (error) {
     if (showNotice) toast(error.message, true)
   }
 }
-

@@ -69,6 +69,8 @@ export class A2AClientRuntime implements AgentSessionRuntime {
     private taskId = ''
     private contextId = ''
     private prompting = false
+    private promptFinished?: Promise<void>
+    private queuedResponse = false
     private disposed = false
     private activeController?: AbortController
     private readonly artifactCache = new Map<string, AgentdArtifact>()
@@ -84,6 +86,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
     ) {}
 
     async start() {
+        if (this.disposed) throw new Error('A2A runtime is disposed')
         const resolver = createResolver(this.config)
         this.card = await resolveAgentCard(resolver, this.config)
         const fetchImpl = authenticatedFetch(this.config)
@@ -97,6 +100,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
             ]
         })
         this.client = await factory.createFromAgentCard(this.card)
+        if (this.disposed) throw new Error('A2A runtime is disposed')
         this.sink.setState('created')
     }
 
@@ -105,6 +109,8 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         if (this.prompting) throw new Error('A2A session is already processing a message')
         if (this.disposed) throw new Error('A2A runtime is disposed')
         this.prompting = true
+        let finish!: () => void
+        this.promptFinished = new Promise<void>((resolve) => { finish = resolve })
         this.sawTaskStatus = false
         this.sawAgentMessage = false
         this.completionProof = undefined
@@ -122,9 +128,13 @@ export class A2AClientRuntime implements AgentSessionRuntime {
             for await (const response of this.client.sendMessageStream(request, {
                 signal: controller.signal
             })) {
+                if (controller.signal.aborted || this.disposed) break
+                // An accepted answer supersedes the old input-required stream.
+                // Its trailing status must not reopen the answered request.
+                if (this.queuedResponse) continue
                 this.processResponse(response)
             }
-            if (this.sink.state === 'running') {
+            if (this.sink.state === 'running' && !this.queuedResponse) {
                 if (this.completionProof) {
                     this.sink.completeTurn(this.completionProof)
                 } else if (!this.sawTaskStatus && this.sawAgentMessage) {
@@ -142,13 +152,15 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                 }
             }
         } catch (error) {
-            if (this.sink.state !== 'canceled') {
+            if (this.sink.state !== 'canceled' && !this.queuedResponse) {
                 this.sink.setState('failed', abortMessage(error, controller.signal))
             }
         } finally {
             clearTimeout(timer)
             if (this.activeController === controller) this.activeController = undefined
             this.prompting = false
+            finish()
+            this.promptFinished = undefined
         }
     }
 
@@ -156,6 +168,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         response: AgentdPendingResponse | string,
         attachments: AgentdInputAttachment[] = []
     ) {
+        if (!this.isAvailable()) throw new Error('A2A runtime is unavailable')
         if (this.sink.state !== 'input_required') {
             throw new Error('A2A session is not waiting for input')
         }
@@ -168,11 +181,22 @@ export class A2AClientRuntime implements AgentSessionRuntime {
                     ? 'decline'
                     : response.message ?? response.optionId ?? ''
         if (!message.trim()) throw new Error('A2A pending response is empty')
+        const previous = this.promptFinished || Promise.resolve()
+        this.queuedResponse = true
         this.sink.clearPending()
-        await this.prompt(message, attachments)
+        this.sink.setState('running')
+        void previous.then(async () => {
+            this.queuedResponse = false
+            if (this.disposed || this.sink.state === 'canceled') return
+            await this.prompt(message, attachments)
+        }).catch((error) => {
+            if (!this.disposed && this.sink.state !== 'canceled') this.sink.setState('failed', errorMessage(error))
+        })
     }
 
     async cancel() {
+        this.sink.clearPending()
+        this.sink.setState('canceled')
         this.activeController?.abort(new Error('A2A session canceled'))
         if (this.client && this.taskId) {
             try {
@@ -195,6 +219,10 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.disposed = true
         this.activeController?.abort(new Error('A2A runtime disposed'))
         this.activeController = undefined
+    }
+
+    isAvailable() {
+        return !this.disposed && Boolean(this.client && this.card)
     }
 
     private messageRequest(
@@ -388,13 +416,42 @@ function createResolver(config: AgentdA2AConfig) {
     })
 }
 
-function resolveAgentCard(
+async function resolveAgentCard(
     resolver: DefaultAgentCardResolver,
     config: AgentdA2AConfig
 ) {
-    if (config.agentCardUrl) return resolver.resolve(config.agentCardUrl, '')
-    if (config.agentUrl) return resolver.resolve(config.agentUrl)
-    throw new Error('A2A Agent Card URL is required')
+    const origin = configuredOrigin(config)
+    const card = config.agentCardUrl
+        ? await resolver.resolve(config.agentCardUrl, '')
+        : await resolver.resolve(config.agentUrl!)
+    // The resolver normalizes v0.3 url/additionalInterfaces into this array.
+    // Validate every advertised endpoint before transport selection or probing.
+    if (!Array.isArray(card.supportedInterfaces) || !card.supportedInterfaces.length) {
+        throw new Error('A2A Agent Card must declare at least one interface URL')
+    }
+    for (const endpoint of card.supportedInterfaces) assertSameOrigin(endpoint?.url, origin)
+    return card
+}
+
+function a2aUrl(value: string) {
+    let url: URL
+    try { url = new URL(value) } catch { throw new Error('A2A URL is invalid') }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
+        throw new Error('A2A URL must use http(s) without credentials or a fragment')
+    }
+    return url
+}
+
+function configuredOrigin(config: AgentdA2AConfig) {
+    const value = config.agentCardUrl || config.agentUrl
+    if (!value) throw new Error('A2A Agent Card URL is required')
+    return a2aUrl(value).origin
+}
+
+function assertSameOrigin(value: string, origin: string) {
+    if (a2aUrl(value).origin !== origin) {
+        throw new Error('A2A URL must have the same origin as the configured Agent Card URL')
+    }
 }
 
 function preferredTransports(
@@ -406,8 +463,12 @@ function preferredTransports(
 }
 
 function authenticatedFetch(config: AgentdA2AConfig): typeof fetch {
+    const origin = configuredOrigin(config)
     return async (input, init = {}) => {
-        const headers = new Headers(init.headers)
+        // The final guard also covers SDK-derived paths and future card flows.
+        // Check before attaching credentials; never let fetch follow redirects.
+        assertSameOrigin(input instanceof Request ? input.url : String(input), origin)
+        const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined))
         if (config.auth?.type === 'bearer' && config.auth.value) {
             headers.set('Authorization', `Bearer ${config.auth.value}`)
         } else if (
@@ -420,6 +481,7 @@ function authenticatedFetch(config: AgentdA2AConfig): typeof fetch {
         return fetch(input, {
             ...init,
             headers,
+            redirect: 'error',
             signal: init.signal || AbortSignal.timeout(config.timeoutMs || 60_000)
         })
     }

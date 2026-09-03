@@ -24,7 +24,7 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         const html = await response.text()
         assert.match(html, /Agent Nexus/)
         assert.match(html, /lang="zh-CN"/)
-        for (const label of ['总览', '运行记录', '智能体', '工作区', 'API 密钥', '运行设置']) {
+        for (const label of ['运行', '网关配置', '总览', '运行记录', '智能体', '工作区', 'API 密钥', '设置']) {
             assert.match(html, new RegExp(`>${label}<`))
         }
         assert.match(html, /<script type="module" defer src="\/ui\/app\.js"><\/script>/)
@@ -38,7 +38,7 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
         const renderModule = await fetch(`${fixture.base}/ui/app/render.js`)
         assert.equal(renderModule.status, 200)
         const renderSource = await renderModule.text()
-        assert.match(renderSource, /Session 空闲有效期（小时）/)
+        assert.match(renderSource, /会话空闲有效期（小时）/)
         assert.match(renderSource, /清理任务周期（秒）/)
         assert.match(renderSource, /权限确认超时（秒）/)
         assert.match(renderSource, /请求超时（秒）/)

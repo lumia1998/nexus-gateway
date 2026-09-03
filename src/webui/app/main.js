@@ -1,17 +1,17 @@
 import { state } from './state.js'
 import { byId, content, drawerForm, drawerFooter, drawerBackdrop, keyActionMenu } from './dom.js'
 import { api } from './api.js'
-import { toast, runAction } from './toast.js'
+import { toast, runAction, withBusy } from './toast.js'
 import { boot, enterApp, showLogin } from './screens.js'
 import { applyTheme } from './theme.js'
 import { loadAll, refreshRuns, refreshReadiness } from './data.js'
-import { closeDrawer, getDrawerSubmit, openConfirmDrawer } from './drawer.js'
+import { closeDrawer, getDrawerSubmit, getDrawerVersion, openConfirmDrawer, handleDrawerKeydown } from './drawer.js'
 import {
   render,
   openRunDrawer,
   openAgentDrawer,
   openWorkspaceDrawer,
-  openPasswordDrawer,
+  workspaceDependents,
   openKeyDrawer,
   openKeyScopeDrawer,
   openRenameKeyDrawer,
@@ -19,6 +19,7 @@ import {
   copySecret,
   reloadKeys,
   toggleKeyActionMenu,
+  handleKeyMenuKeydown,
   closeKeyActionMenu
 } from './render.js'
 
@@ -30,10 +31,11 @@ function handleKeyAction(action, id) {
     return
   }
   if (action === 'regenerate') {
-    openConfirmDrawer('重新生成 API 密钥', '当前密钥会立即失效，使用它的客户端必须改用新密钥。', '重新生成', async () => {
+    openConfirmDrawer('重新生成 API 密钥', '当前密钥会立即失效，使用它的客户端必须改用新密钥。', '重新生成', async (isCurrent) => {
       const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/regenerate', { method: 'POST' })
       await reloadKeys()
-      showSecret('API 密钥已重新生成', value.secret)
+      if (isCurrent()) showSecret('API 密钥已重新生成', value.secret)
+      else toast('API 密钥已重新生成，可在密钥列表中显示或复制')
     })
     return
   }
@@ -103,11 +105,15 @@ async function handleContentClick(event) {
   if (button.dataset.workspaceDelete !== undefined) {
     const index = Number(button.dataset.workspaceDelete)
     const root = (state.config.workspaceRoots || [])[index] || ''
-    openConfirmDrawer('移除工作区', '移除后智能体将无法再访问 ' + root + '。', '移除根目录', async () => {
+    if (workspaceDependents(index).length) {
+      toast('请先修改使用此工作区的智能体配置', true)
+      return
+    }
+    openConfirmDrawer('删除工作区', '删除后，新会话将无法再使用 ' + root + '；目录中的文件不会被删除。', '删除工作区', async () => {
       const roots = state.config.workspaceRoots.filter((_, itemIndex) => itemIndex !== index)
       state.config = await api('/v1/admin/config/workspace-roots', { method: 'PUT', body: { workspaceRoots: roots } })
       render()
-      toast('工作区已移除')
+      toast('工作区已删除')
     })
     return
   }
@@ -119,34 +125,45 @@ async function handleContentClick(event) {
 byId('setup-form').onsubmit = async (event) => {
   event.preventDefault()
   const form = event.currentTarget
-  const error = form.querySelector('[data-form-error]')
-  error.textContent = ''
-  const data = new FormData(form)
-  try {
-    await api('/v1/bootstrap/initialize', { method: 'POST', body: { password: String(data.get('password') || ''), confirmPassword: String(data.get('confirmPassword') || '') } })
-    form.reset()
-    showLogin()
-    toast('初始化完成，请使用控制台密码登录。')
-  } catch (reason) { error.textContent = reason.message }
+  await withBusy(event.submitter || form.querySelector('[type="submit"]'), async () => {
+    const error = form.querySelector('[data-form-error]')
+    error.textContent = ''
+    const data = new FormData(form)
+    try {
+      await api('/v1/bootstrap/initialize', { method: 'POST', body: { password: String(data.get('password') || ''), confirmPassword: String(data.get('confirmPassword') || '') } })
+      form.reset()
+      showLogin()
+      toast('初始化完成，请使用控制台密码登录。')
+    } catch (reason) { error.textContent = reason.message }
+  })
 }
 
 byId('login-form').onsubmit = async (event) => {
   event.preventDefault()
   const form = event.currentTarget
-  const error = form.querySelector('[data-form-error]')
-  error.textContent = ''
-  try {
-    const data = new FormData(form)
-    await api('/v1/admin/auth/login', { method: 'POST', body: { password: String(data.get('password') || '') } })
-    form.reset()
-    await enterApp()
-  } catch (reason) { error.textContent = reason.message }
+  await withBusy(event.submitter || form.querySelector('[type="submit"]'), async () => {
+    const error = form.querySelector('[data-form-error]')
+    error.textContent = ''
+    try {
+      const data = new FormData(form)
+      await api('/v1/admin/auth/login', { method: 'POST', body: { password: String(data.get('password') || '') } })
+      form.reset()
+      await enterApp()
+    } catch (reason) { error.textContent = reason.message }
+  })
 }
 
 /* ── Navigation ───────────────────────────────────────────────────── */
 
 document.querySelectorAll('.nav-item').forEach((item) => {
   item.onclick = () => {
+    if (item.dataset.action === 'logout') {
+      void runAction(async () => {
+        await api('/v1/admin/auth/logout', { method: 'POST' })
+        showLogin()
+      })
+      return
+    }
     state.page = item.dataset.page
     render()
     if (state.page === 'runs') void refreshRuns(false)
@@ -156,11 +173,19 @@ document.querySelectorAll('.nav-item').forEach((item) => {
 /* ── Global click delegation ──────────────────────────────────────── */
 
 content.addEventListener('click', (event) => { void handleContentClick(event) })
+content.addEventListener('keydown', (event) => {
+  const anchor = event.target.closest('[data-key-menu]')
+  if (!anchor || !['ArrowDown', 'ArrowUp'].includes(event.key)) return
+  event.preventDefault()
+  toggleKeyActionMenu(anchor, anchor.dataset.keyMenu)
+  if (event.key === 'ArrowUp') handleKeyMenuKeydown({ key: 'End', preventDefault() {} })
+})
+keyActionMenu.addEventListener('keydown', handleKeyMenuKeydown)
 
 keyActionMenu.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-key-action]')
   if (!button) return
-  closeKeyActionMenu()
+  closeKeyActionMenu(true)
   void handleKeyAction(button.dataset.keyAction, button.dataset.keyId)
 })
 
@@ -170,9 +195,18 @@ drawerForm.onsubmit = async (event) => {
   event.preventDefault()
   const submit = getDrawerSubmit()
   if (!submit) return
-  const error = drawerForm.querySelector('[data-form-error]')
-  error.textContent = ''
-  try { await submit(drawerForm) } catch (reason) { error.textContent = reason.message }
+  const version = getDrawerVersion()
+  await withBusy(drawerFooter.querySelector('[type="submit"]'), async () => {
+    const error = drawerForm.querySelector('[data-form-error]')
+    error.textContent = ''
+    try { await submit(drawerForm) } catch (reason) {
+      if (version === getDrawerVersion()) {
+        error.textContent = reason.message
+        error.scrollIntoView({ block: 'nearest' })
+      }
+      else toast(reason.message, true)
+    }
+  })
 }
 drawerForm.addEventListener('click', (event) => {
   if (event.target.closest('[data-close-drawer]')) closeDrawer()
@@ -183,39 +217,17 @@ drawerFooter.addEventListener('click', (event) => {
 byId('drawer-close').onclick = closeDrawer
 drawerBackdrop.onclick = closeDrawer
 
-/* ── Admin menu ───────────────────────────────────────────────────── */
-
-byId('admin-menu').onclick = () => {
-  const popover = byId('admin-popover')
-  const hidden = popover.classList.toggle('hidden')
-  byId('admin-menu').setAttribute('aria-expanded', String(!hidden))
-}
-byId('theme-select').onchange = (event) => {
-  localStorage.setItem('agent-nexus-theme', event.target.value)
-  applyTheme(event.target.value)
-}
-byId('change-password').onclick = () => { byId('admin-popover').classList.add('hidden'); openPasswordDrawer() }
-byId('logout').onclick = async () => {
-  await runAction(async () => {
-    await api('/v1/admin/auth/logout', { method: 'POST' })
-    showLogin()
-  })
-}
-
 /* ── Global listeners ─────────────────────────────────────────────── */
 
 document.addEventListener('click', (event) => {
-  if (!event.target.closest('.admin-menu-wrap')) byId('admin-popover').classList.add('hidden')
   if (!event.target.closest('.key-action-menu') && !event.target.closest('[data-key-menu]')) closeKeyActionMenu()
 })
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if ((localStorage.getItem('agent-nexus-theme') || 'system') === 'system') applyTheme('system')
 })
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
-    closeKeyActionMenu()
-    closeDrawer()
-  }
+  if (event.isComposing) return
+  handleDrawerKeydown(event)
 })
 window.addEventListener('resize', closeKeyActionMenu)
 window.addEventListener('scroll', closeKeyActionMenu, true)
@@ -231,4 +243,3 @@ setInterval(() => {
 }, 5_000)
 
 void boot()
-

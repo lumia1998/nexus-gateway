@@ -9,6 +9,29 @@ import { createDriverRegistry } from '../src/drivers/index.js'
 import { SessionManager } from '../src/session.js'
 import { WorkspacePolicy } from '../src/workspace.js'
 
+test('workspace changes report an actionable conflict and preserve the config', async () => {
+    const fixture = await createFixture({ initialized: false, agents: {} })
+    try {
+        const project = path.join(fixture.directory, 'project')
+        const spare = path.join(fixture.directory, 'spare')
+        await mkdir(project)
+        await mkdir(spare)
+        await fixture.control.putAgent('worker', { protocol: 'acp', driver: 'codex', workspace: project })
+        const before = await readFile(fixture.configPath, 'utf8')
+        await assert.rejects(() => fixture.control.putWorkspaceRoots([spare]), (error: unknown) => {
+            assert.ok(error instanceof ControlPlaneError)
+            assert.equal(error.status, 409)
+            assert.equal(error.message, 'Workspace change would exclude agent: worker')
+            return true
+        })
+        assert.equal(await readFile(fixture.configPath, 'utf8'), before)
+        await fixture.control.putWorkspaceRoots([project, spare])
+        await fixture.control.putWorkspaceRoots([fixture.directory])
+    } finally {
+        await fixture.close()
+    }
+})
+
 test('Console Password setup is hashed, atomic, separate from API Keys, and one-time', async () => {
     const fixture = await createFixture({ initialized: false, apiKeys: [], agents: {} })
     try {

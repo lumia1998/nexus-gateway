@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
+import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { AcpProcessRuntime } from '../src/acp/runtime.js'
 import { terminateProcessTree } from '../src/process-tree.js'
@@ -140,27 +141,14 @@ test('captures a Hermes MEDIA marker as an artifact before completing the turn',
     const workspace = path.join(directory, 'workspace')
     const file = path.join(skillDirectory, 'wangjunkai.pptx')
     await mkdir(skillDirectory, { recursive: true })
+    await mkdir(workspace, { recursive: true })
     await writeFile(file, 'pptx-bytes')
     const sink = createSink()
-    const runtime = new AcpProcessRuntime(driver(), sink as any)
-    ;(runtime as any).workspace = workspace
-    ;(runtime as any).connection = {
-        agent: {
-            async request() {
-                ;(runtime as any).sessionUpdate({
-                    update: {
-                        sessionUpdate: 'agent_message_chunk',
-                        messageId: 'assistant-1',
-                        content: {
-                            type: 'text',
-                            text: `PPT 已完成。\nMEDIA:${file}\n`
-                        }
-                    }
-                })
-                return { stopReason: 'end_turn' }
-            }
-        }
-    }
+    // The deliverable sits outside the session workspace but inside a configured
+    // root, which is the skill-directory layout this feature exists for.
+    const runtime = mediaRuntime(sink, `PPT 已完成。\nMEDIA:${file}\n`, [
+        await realpath(directory)
+    ], workspace)
 
     try {
         await runtime.prompt('做个 PPT')
@@ -184,6 +172,75 @@ test('captures a Hermes MEDIA marker as an artifact before completing the turn',
             }
         )
         assert.equal(sink.events.some((event) => event.type === 'artifact'), true)
+    } finally {
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('refuses a MEDIA marker outside every configured root', async () => {
+    const allowed = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-allowed-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-outside-'))
+    const secret = path.join(outside, 'credentials.txt')
+    await writeFile(secret, 'host-credential')
+    const sink = createSink()
+    const runtime = mediaRuntime(sink, `Done.\nMEDIA:${secret}\n`, [await realpath(allowed)])
+
+    try {
+        await runtime.prompt('declare the file')
+        assert.equal(sink.artifacts.length, 0)
+        assert.equal(sink.state, 'completed')
+        assert.equal(
+            JSON.stringify(sink.artifacts).includes('host-credential'),
+            false,
+            'the file contents must not reach the artifact list'
+        )
+        assert.match(terminalText(sink), /outside the configured allowlist/)
+    } finally {
+        await rm(allowed, { recursive: true, force: true })
+        await rm(outside, { recursive: true, force: true })
+    }
+})
+
+test('refuses a file: URL MEDIA marker outside every configured root', async () => {
+    const allowed = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-url-allowed-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-url-outside-'))
+    const secret = path.join(outside, 'id_rsa')
+    await writeFile(secret, 'private-key')
+    const sink = createSink()
+    const runtime = mediaRuntime(
+        sink,
+        `Done.\nMEDIA:${pathToFileURL(secret).toString()}\n`,
+        [await realpath(allowed)]
+    )
+
+    try {
+        await runtime.prompt('declare the file')
+        assert.equal(sink.artifacts.length, 0)
+        assert.equal(sink.state, 'completed')
+        assert.equal(JSON.stringify(sink.artifacts).includes('private-key'), false)
+        assert.match(terminalText(sink), /outside the configured allowlist/)
+    } finally {
+        await rm(allowed, { recursive: true, force: true })
+        await rm(outside, { recursive: true, force: true })
+    }
+})
+
+test('attaches at most eight MEDIA markers and reports the rest', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-media-cap-'))
+    const lines = ['Done.']
+    try {
+        for (let index = 0; index < 10; index += 1) {
+            const file = path.join(directory, `part-${index}.txt`)
+            await writeFile(file, `bytes-${index}`)
+            lines.push(`MEDIA:${file}`)
+        }
+        const sink = createSink()
+        const runtime = mediaRuntime(sink, `${lines.join('\n')}\n`, [await realpath(directory)])
+        await runtime.prompt('declare ten files')
+
+        assert.equal(sink.artifacts.length, 8)
+        assert.equal(sink.state, 'completed')
+        assert.match(terminalText(sink), /Ignored 2 MEDIA marker/)
     } finally {
         await rm(directory, { recursive: true, force: true })
     }
@@ -418,4 +475,37 @@ function createSink() {
             this.events.push({ type, data })
         }
     }
+}
+
+function mediaRuntime(
+    sink: ReturnType<typeof createSink>,
+    text: string,
+    roots: string[],
+    workspace?: string
+) {
+    const runtime = new AcpProcessRuntime(driver(), sink as any)
+    ;(runtime as any).workspace = workspace
+    ;(runtime as any).allowedRoots = roots
+    ;(runtime as any).connection = {
+        agent: {
+            async request() {
+                ;(runtime as any).sessionUpdate({
+                    update: {
+                        sessionUpdate: 'agent_message_chunk',
+                        messageId: 'assistant-1',
+                        content: { type: 'text', text }
+                    }
+                })
+                return { stopReason: 'end_turn' }
+            }
+        }
+    }
+    return runtime
+}
+
+function terminalText(sink: ReturnType<typeof createSink>) {
+    return sink.events
+        .filter((event) => event.type === 'terminal_output')
+        .map((event) => String(event.data?.text || ''))
+        .join('\n')
 }

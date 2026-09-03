@@ -5,6 +5,7 @@ export const state = {
   apiKeys: [],
   runs: [],
   runTotal: 0,
+  runStats: { active: 0, completed: 0, failed: 0 },
   sessions: 0,
   search: '',
   protocol: 'all',
@@ -21,6 +22,5 @@ export const pageMeta = {
   agents: '智能体',
   workspaces: '工作区',
   keys: 'API 密钥',
-  settings: '运行设置'
+  settings: '设置'
 }
-

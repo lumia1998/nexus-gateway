@@ -49,16 +49,19 @@ Workspace 配置保持不变。
 
 ## WebUI
 
-固定侧栏有总览、运行记录、智能体、工作区、API 密钥和运行设置六个主页面。管理员菜单位于侧栏底部，
-提供 Light / Dark / System 主题、修改密码和退出登录。
+侧栏按“运行”和“网关配置”分组，提供总览、运行记录、智能体、工作区、API 密钥五个页面；底部提供独立的“设置”和“退出登录”入口。
+“设置”页面集中管理运行参数、浅色 / 深色 / 跟随系统主题和控制台密码。
 
-- Overview 只显示真实 Agent、Ready 和当前内存 Session 数量。
+- 总览显示智能体、就绪和当前内存会话数量，并列出需要注意的智能体。
 - 运行记录把当前任务和历史任务分开显示，记录用户原始任务、真实运行阶段、状态、结果摘要、
   耗时和产物；每 5 秒自动刷新，也可查看完整详情。
+  顶部统计涵盖全部保留记录；列表载入最近 200 条，搜索和筛选作用于已载入的记录。
+  轮询保留搜索框、输入法组合态与筛选控件，表格详情和菜单支持键盘操作。
 - Agents 支持本地 ACP 与远程 A2A；readiness 每 20 秒自动刷新，也可手动刷新。
 - Workspaces 管理 ACP 的 realpath allowlist；A2A 不使用本地 Workspace。
 - API Keys 显示真实状态和最后使用时间，并提供独立的显式 reveal 操作。
-- 运行设置可以直接修改 Session 空闲有效期、ACP 单次任务超时和清理任务周期，保存后立即热生效。
+- 设置中的运行参数可以直接修改会话空闲有效期、ACP 单次任务超时和清理任务周期，保存后立即热生效。
+  运行参数与控制台密码共用右上角“保存更改”，修改智能体权限策略后列表会立即刷新。
   默认值分别是 24 小时、30 分钟和 60 秒；A2A 请求超时在每个 Agent 的编辑页单独设置，默认 60 秒、
   最大 30 分钟。
 
@@ -111,6 +114,10 @@ A2A 使用官方 `@a2a-js/sdk` 客户端，通过完整的 Agent Card URL 发现
 首选传输可设为 `auto`、`jsonrpc` 或 `http-json`；可配置无认证、Bearer 或自定义 Header。私有网段
 和局域网 URL 不会被禁止。
 
+Agent Card 和它声明的全部接口 URL 必须使用 HTTP(S)，不含用户名、密码或 fragment；接口必须与
+配置的 Card 地址同源（协议、主机、端口均一致）。发现和业务请求都拒绝 HTTP 重定向，包括同源
+重定向，请直接配置最终地址。跨源部署可通过同源反向代理接入，避免把认证值发送给 Card 指定的其他站点。
+
 ```json
 {
   "protocol": "a2a",
@@ -159,6 +166,12 @@ ACP Session 还支持显式发布工作区文件。发布接口只接受 realpat
 拒绝目录、路径穿越和符号链接逃逸，单个文件最多 12 MiB。请求 body 支持单文件 `{ "path": "..." }` 或
 批量 `{ "paths": ["..."] }`（一次最多 32 条），响应在正常 Session 视图上附加
 `publishedArtifacts` 数组，本次发布的文件以 base64 内联返回；不会暴露宿主机绝对路径，也不生成外部 URL。
+
+Agent 也可以在最终文本里用 `MEDIA:<path>` 行声明交付文件，Gateway 在该轮完成前把它们快照为
+Artifact，已处理的 `MEDIA:` 行不会出现在最终输出里。这条路径的边界是配置的 `workspaceRoots`，
+比发布接口的 Session 工作区更宽——Agent 常把交付文件写在工作区旁边的 skill 目录，该目录必须在
+`workspaceRoots` 内才会被附加。单轮最多 8 个文件、单个文件最多 12 MiB；越界路径（含 `file://`
+形式）被拒绝，原因写入 Session 事件流，该轮仍正常完成。
 
 API Key 与 A2A 认证值支持 `env:VAR`。Console Password 哈希由 WebUI 管理，不要手工生成或把
 旧 `authToken` 复制到该字段。
@@ -223,6 +236,11 @@ GET  /v1/sessions/:id/events
 释放 Agent 整个进程组并移除内存 Session。Gateway 停止时会先终止 Session，再在有限宽限期后关闭残留
 HTTP/SSE 连接，避免长连接或 Agent 孙进程阻塞服务重启。
 
+消息和待输入回复的 `202` 表示已接受，执行结果通过 Session/SSE 查询；A2A 回复等待旧消息流结束后
+发送，不会在等待期间占用会话操作锁。取消 ACP 或 A2A 会话会释放 runtime，随后向该会话提交消息或
+回复返回 `409`，需要新建会话继续。ACP 初始化和 `session/new` 共用 30 秒握手期限，超时会失败并
+回收子进程及会话槽位；该期限独立于任务执行超时。
+
 API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session 操作上都会检查；Session
 还绑定创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。
 运行记录接口仅接受管理员 Cookie，数据面 API Key 无权读取。
@@ -242,6 +260,8 @@ API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session �
 npm test
 npm run typecheck
 npm run build
+npx playwright install chromium
+npm run test:webui
 npm pack --dry-run --json
 ```
 

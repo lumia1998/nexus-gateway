@@ -247,7 +247,15 @@ export class AgentdControlPlane {
             if (!workspaceRoots.length) {
                 throw new ControlPlaneError(400, 'workspaceRoots must contain at least one path')
             }
-            await WorkspacePolicy.create(workspaceRoots)
+            const policy = await WorkspacePolicy.create(workspaceRoots)
+            for (const [id, agent] of Object.entries(this.config.agents)) {
+                if (agent.protocol === 'a2a' || !agent.workspace) continue
+                try {
+                    await policy.resolve(agent.workspace)
+                } catch {
+                    throw new ControlPlaneError(409, `Workspace change would exclude agent: ${id}`)
+                }
+            }
             const raw = await this.readRawConfig()
             raw.workspaceRoots = workspaceRoots
             await this.persist(raw)

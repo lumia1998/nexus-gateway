@@ -29,6 +29,7 @@ export interface AcpSessionSink extends AgentSessionSink {
 }
 
 export interface AgentSessionRuntime {
+    isAvailable?(): boolean
     start(workspace?: string): Promise<void>
     prompt(message: string, attachments?: AgentdInputAttachment[]): Promise<void>
     respondPending(

@@ -6,6 +6,29 @@ import test from 'node:test'
 import { RunStore, runStorePathForConfig } from '../src/run-store.js'
 import { ManagedSession } from '../src/session.js'
 
+test('run statistics cover all matching records before the page limit', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-stats-'))
+    const store = new RunStore(path.join(directory, 'runs.json'))
+    try {
+        await store.init()
+        for (let index = 0; index < 240; index++) {
+            const run = store.create({ sessionId: String(index), agentId: index < 120 ? 'alpha' : 'beta', agentName: 'Agent', protocol: 'acp', ownerKeyId: 'owner', task: `Task ${index}` })
+            const state = index % 4 === 0 ? 'completed' : index % 4 === 1 ? 'failed' : index % 4 === 2 ? 'canceled' : 'permission_required'
+            store.update(run.id, { state })
+        }
+        const page = store.list({ limit: 200 })
+        assert.equal(page.runs.length, 200)
+        assert.equal(page.total, 240)
+        assert.deepEqual(page.stats, { active: 60, completed: 60, failed: 60 })
+        assert.deepEqual(store.list({ agentId: 'alpha', limit: 1 }).stats, { active: 30, completed: 30, failed: 30 })
+        assert.deepEqual(store.list({ state: 'failed', limit: 1 }).stats, { active: 0, completed: 0, failed: 60 })
+        assert.deepEqual(store.list({ query: 'missing' }).stats, { active: 0, completed: 0, failed: 0 })
+    } finally {
+        await store.flush()
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
 test('persists run history separately and closes stale active runs on restart', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-runs-'))
     const configPath = path.join(directory, 'nexus-agentd.json')

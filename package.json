@@ -1,7 +1,7 @@
 {
   "name": "nexus-agentd",
-  "version": "0.2.5",
-  "description": "Local Nexus Gateway daemon that exposes allowlisted Coding Agents through HTTP/SSE and ACP",
+  "version": "0.2.6",
+  "description": "Local Nexus Gateway daemon with an HTTP/SSE API and WebUI for allowlisted ACP and remote A2A agents",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -36,6 +36,7 @@
     "build": "node scripts/generate-webui-sources.mjs && node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "typecheck": "node scripts/generate-webui-sources.mjs && tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
+    "test:webui": "node scripts/generate-webui-sources.mjs && playwright test",
     "prepack": "npm run build"
   },
   "dependencies": {
@@ -44,6 +45,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^20.14.0",
     "tsx": "^4.21.0",
     "typescript": "^5.6.0"

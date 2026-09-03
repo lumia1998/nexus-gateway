@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+playwright-report/
+test-results/
 *.tsbuildinfo
 *.log
 .env
@@ -11,3 +13,4 @@ nexus-agentd.json
 Thumbs.db
 
 nexus-agentd-runs.json
+/.local-preview/
