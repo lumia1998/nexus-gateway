@@ -31,12 +31,15 @@ git diff --check
 
 ## 正式发布
 
-以下步骤尚未执行：
+已执行：
 
 1. 选定新的发布版本，更新 package.json、package-lock.json 和 CHANGELOG。
-2. 提交本轮改动，确认 Linux CI 通过，再推送对应发布 Tag。
-3. 用 `npm whoami` 检查发布账户，未登录时运行 `npm login`。
-4. 再次构建、检查包内容，然后执行 `npm publish`。
-5. 用 `npm view nexus-agentd@<发布版本>` 验证实际发布结果。
+2. 提交本轮改动，推送 `main` 和 `v0.2.6` Tag（提交 `fe86c71`）。
+3. 再次构建、检查包内容，然后执行 `npm publish --access public`；构建和打包检查通过，包为 64 个文件 / 92.1 kB。
+
+待完成：
+
+4. 当前 npm Registry 返回 `E404 Not Found`，`npm whoami` 返回 `401 Unauthorized`，因此 `nexus-agentd@0.2.6` 尚未发布。登录拥有该包权限的 npm 账户后，在仓库执行 `npm publish --access public`。
+5. 发布成功后用 `npm view nexus-agentd@0.2.6 version dist-tags --json` 验证。
 
 不要直接把当前 0.2.6 工作树当作一个已经完成发布的版本；必须以 Git 提交、Tag 和 npm Registry 验证结果为准。
