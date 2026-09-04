@@ -1,16 +1,16 @@
-# NPM 发布准备
+# NPM 发布记录
 
-更新：2026-09-03。实施进度见 [PROGRESS.md](./PROGRESS.md)，评审与后续风险见 [REVIEW.md](./REVIEW.md)。
+更新：2026-09-04。实施进度见 [PROGRESS.md](./PROGRESS.md)，评审与后续风险见 [REVIEW.md](./REVIEW.md)。
 
 ## 当前状态
 
-- 本地 package.json 版本将升级为 **0.2.6**；发布前会同步 package-lock、CHANGELOG 和 Git Tag。
-- Step 0–9、A2A P0-2 和健壮性 P1-A/B/E 已在工作树完成，尚未提交、推送、创建新 Tag 或发布到 npm。
-- 原文档中“0.2.4 已准备发布”的状态已过时。此处不代表 npm Registry 的实时状态。
+- package.json、package-lock、CHANGELOG 与 Git Tag 已同步为 **0.2.6**。
+- Step 0–9、A2A P0-2 和健壮性 P1-A/B/E 已提交并推送；发布 Tag 为 `v0.2.6`。
+- `nexus-agentd@0.2.6` 已发布到 npm，公开 Registry 回读确认 `latest` 指向 `0.2.6`。
 - 本地验证：类型检查、Linux Node 59/59（0 跳过）、Windows Node 52/0/7、Windows Chromium 19/19、构建与打包检查。真实本地实例另完成 139 张截图验收与 9 类布局修复（含设置页重构和移动端工作区长文本修复）。
 - Windows Node 的 7 个跳过项只要求 POSIX 进程回收能力；项目部署目标仍为 Linux。详见 PROGRESS.md。
-- Linux 实测环境是 WSL2 Ubuntu / Node v22.22.1，已补齐 Playwright Chromium 系统依赖。GitHub Actions 使用 Node 20，已加入浏览器和生成物漂移检查，当前工作树尚未触发远端 CI。
-- REVIEW.md 中仍有 6 条安全 P1、健壮性 P1-C/D 及 P2 待办，发布前需继续处理或明确接受这些已知问题。
+- Linux 实测环境是 WSL2 Ubuntu / Node v22.22.1，已补齐 Playwright Chromium 系统依赖。GitHub Actions 使用 Node 20，发布提交与状态提交的浏览器、测试及生成物漂移检查均已通过。
+- REVIEW.md 中仍有 6 条安全 P1、健壮性 P1-C/D 及 P2 待办，作为后续版本工作继续处理。
 
 ## 发布前验证
 
@@ -37,9 +37,5 @@ git diff --check
 2. 提交本轮改动，推送 `main` 和 `v0.2.6` Tag（提交 `fe86c71`）。
 3. 再次构建、检查包内容，然后执行 `npm publish --access public`；构建和打包检查通过，包为 64 个文件 / 92.1 kB。
 
-待完成：
-
-4. 当前 npm Registry 返回 `E404 Not Found`，`npm whoami` 返回 `401 Unauthorized`，因此 `nexus-agentd@0.2.6` 尚未发布。登录拥有该包权限的 npm 账户后，在仓库执行 `npm publish --access public`。
-5. 发布成功后用 `npm view nexus-agentd@0.2.6 version dist-tags --json` 验证。
-
-不要直接把当前 0.2.6 工作树当作一个已经完成发布的版本；必须以 Git 提交、Tag 和 npm Registry 验证结果为准。
+4. 使用 `lumia.wang` npm 账户发布 `nexus-agentd@0.2.6`。
+5. 公开执行 `npm view nexus-agentd@0.2.6 version dist-tags --json`，确认版本为 `0.2.6`、`latest` 为 `0.2.6`。

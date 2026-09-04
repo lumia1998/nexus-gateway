@@ -1,7 +1,7 @@
 # 执行进度
 
 评审结论与完整计划见 [`REVIEW.md`](./REVIEW.md)
-基线 HEAD `3935d5c`（v0.2.5）· 计划发布 v0.2.6 · 更新时间 2026-09-03
+基线 HEAD `3935d5c`（v0.2.5）· 已发布 v0.2.6 · 更新时间 2026-09-04
 
 ## 当前状态
 
@@ -12,8 +12,8 @@
 | Node 测试 | ✅ Linux 59/59 通过、0 跳过；Windows 52 通过、0 失败、7 跳过（仅 POSIX 进程回收用例） |
 | WebUI 浏览器测试 | ✅ Windows 19/19；另完成真实本地网关的 124 场景布局巡检与 15 张提交流程截图 |
 | build / pack | ✅ 通过，64 个文件 / 92,138 字节；包内 0 个 `.css`、0 个 `src/`，不含本地预览配置、凭据和截图 |
-| **提交** | ⚠️ **全部未提交**，改动都在工作树里 |
-| 改动范围 | 前后端源文件、测试、CI、生成物及进度文档；具体内容以 `git diff --stat` 为准（EOL 归一会使 `git status` 更长） |
+| **提交** | ✅ `main` 已推送；发布 Tag `v0.2.6` 已推送 |
+| 改动范围 | 前后端源文件、测试、CI、生成物及进度文档均已纳入 Git |
 
 新文件：`.gitattributes`、`src/webui/styles.css`、`playwright.config.ts`、`test/webui/app.spec.ts`、`test/a2a-security.test.ts`、`test/lifecycle.test.ts`、`test/fixtures/acp-handshake.mjs`，另有本文件与 `REVIEW.md`。
 
@@ -23,7 +23,7 @@
 
 - 原先跳过的 3 个符号链接逃逸拒绝用例已在 Linux 实测通过；`readContainedFile` 的 `swapped` 竞态分支仍未做确定性替换注入测试，不能将静态 symlink 用例当作该分支的覆盖。
 - 新增 4 项真实 ACP 子进程测试验证初始化卡住、session/new 卡住、正常握手和 connection.close 抛错后的清理，Linux 全部通过。Windows 并行测试暴露既有 taskkill 无兜底限制；按项目 Linux 部署范围，这 4 项及 3 项 symlink 测试在 Windows 明确跳过。
-- 这是本地 Linux 实测结果；当前工作树尚未提交，GitHub Actions 的 Node 20 流程仍需提交后确认。
+- 这是本地 Linux 实测结果；发布提交 `fe86c71` 与状态提交 `fb83423` 的 GitHub Actions Node 20 流程均已通过。
 - Chromium 用合成 `compositionstart/input/compositionend` 事件核验 IME 生命周期；未操作真实操作系统输入法，也未使用实际读屏软件。已核验 DOM 焦点、键盘行为、ARIA 容器与播报去重。
 
 ---
@@ -216,11 +216,11 @@ Windows Node 全量当前为 52 通过 / 0 失败 / 7 跳过；跳过项只要�
 
 | 步 | 内容 | 备注 |
 |---|---|---|
-| 验证 | Linux CI | 本地 Linux Node 已 59/59；提交后确认 GitHub Actions Node 20、浏览器与生成物门禁 |
+| 验证 | Linux CI | ✅ GitHub Actions Node 20、浏览器与生成物门禁均已通过 |
 | 安全 | 六项 P1 | 首启抢占、Host 白名单、探测放大、SSE 背压、永久授权、workspace scope |
 | 健壮性 | P1-C / P1-D | 流式输出与持久化放大、A2A 请求和任务超时语义 |
 | 工程 | 整理提交 | 当前改动均未提交；生成物需与源文件一起提交 |
-| 发布 | 版本与 npm | v0.2.6 已提交、推送并打 Tag；npm publish 因当前账号未认证/无包权限返回 E404，见 PUBLISH.md |
+| 发布 | 版本与 npm | ✅ `nexus-agentd@0.2.6` 已发布，npm `latest` 指向 `0.2.6`；见 PUBLISH.md |
 
 **未修项**：6 条安全 P1、一批 P2，以及健壮性 P1-C/D。**A2A P0-2 与健壮性 P1-A/B/E 已修复**，清单和边界见 `REVIEW.md` 第 3–4 节。
 
