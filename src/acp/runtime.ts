@@ -237,14 +237,18 @@ export class AcpProcessRuntime {
             this.finishPermission({ outcome: { outcome: 'cancelled' } })
             return
         }
-        if (response.action === 'accept') {
-            const option =
-                options.find((item) => item.kind?.startsWith('allow')) ||
-                options.find(
-                    (item) => !(item.kind?.startsWith('reject') ?? false)
-                )
+        // Protocol IDs are opaque: never interpret a numeric ID as an index or
+        // fold its case into a different (possibly permanent) permission.
+        if (response.optionId !== undefined) {
+            const option = options.find((item) => item.id === response.optionId)
+            if (!option) throw new Error('Permission optionId does not match an offered option')
+            this.finishPermission({ outcome: { outcome: 'selected', optionId: option.id } })
+            return
+        }
+        if (response.action === 'accept' && !response.optionId) {
+            const option = options.find((item) => item.kind === 'allow_once')
             if (!option) {
-                throw new Error('Permission request does not provide an allow option')
+                throw new Error('Permission request requires an explicit optionId; no allow_once option is available')
             }
             this.finishPermission({
                 outcome: { outcome: 'selected', optionId: option.id }
@@ -369,9 +373,6 @@ export class AcpProcessRuntime {
             const allow =
                 params.options.find(
                     (option) => option.kind.toLowerCase() === 'allow_once'
-                ) ||
-                params.options.find((option) =>
-                    option.kind.toLowerCase().startsWith('allow')
                 )
             return allow
                 ? {

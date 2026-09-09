@@ -37,11 +37,18 @@ test('Agent Nexus WebUI is embedded, framework-free, and free of the retired con
 
         const renderModule = await fetch(`${fixture.base}/ui/app/render.js`)
         assert.equal(renderModule.status, 200)
-        const renderSource = await renderModule.text()
+        const renderSources = [await renderModule.text()]
+        for (const name of ['render-shared', 'render-runs', 'render-agents', 'render-overview', 'render-workspaces', 'render-settings', 'render-keys']) {
+            const pageModule = await fetch(`${fixture.base}/ui/app/${name}.js`)
+            assert.equal(pageModule.status, 200, `module ${name} should be served`)
+            assert.match(pageModule.headers.get('content-type') || '', /text\/javascript/)
+            renderSources.push(await pageModule.text())
+        }
+        const renderSource = renderSources.join('\n')
         assert.match(renderSource, /会话空闲有效期（小时）/)
         assert.match(renderSource, /清理任务周期（秒）/)
         assert.match(renderSource, /权限确认超时（秒）/)
-        assert.match(renderSource, /请求超时（秒）/)
+        assert.match(renderSource, /普通请求\/建连超时（秒）/)
         assert.match(renderSource, /检查中/)
         assert.doesNotMatch(renderSource, /尚未检查/)
         assert.match(renderSource, /Agent Card URL/)
@@ -124,6 +131,7 @@ test('Console Cookie and client API Keys are separate, with upgrade-safe bootstr
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Origin: fixture.base },
             body: JSON.stringify({
+                setupToken: fixture.control.setupToken,
                 password: 'initial-password',
                 confirmPassword: 'initial-password'
             })
@@ -170,7 +178,7 @@ test('Console Cookie and client API Keys are separate, with upgrade-safe bootstr
             ((await runtimeResponse.json()) as Record<string, unknown>),
             {
                 workspaceRoots: [fixture.directory],
-                driverKinds: ['opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes'],
+            driverKinds: ['stdio', 'opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes'],
                 sessionTtlMs: 48 * 60 * 60 * 1000,
                 promptTimeoutMs: 20 * 60 * 1000,
                 cleanupIntervalMs: 30_000,
@@ -246,6 +254,7 @@ test('run history is admin-only, filterable, and exposes bounded details', async
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Origin: fixture.base },
             body: JSON.stringify({
+                setupToken: fixture.control.setupToken,
                 password: 'runs-password',
                 confirmPassword: 'runs-password'
             })
@@ -296,7 +305,8 @@ test('run history is admin-only, filterable, and exposes bounded details', async
         const body = await listed.json()
         assert.equal(body.total, 1)
         assert.equal(body.runs[0].id, hermes.id)
-        assert.equal(body.runs[0].task, '  原样保留的任务  ')
+        assert.equal(body.runs[0].taskPreview, '  原样保留的任务  ')
+        assert.equal('task' in body.runs[0], false)
         assert.equal(body.runs[0].resultSummary, '任务结果')
         assert.equal('output' in body.runs[0], false)
         assert.equal(JSON.stringify(body).includes('private-key-id'), false)

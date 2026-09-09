@@ -95,6 +95,34 @@ test('allow permission policy selects allow-once without creating a pending requ
     assert.equal(sink.state, 'created')
 })
 
+test('implicit acceptance never selects permanent permission; explicit selection remains supported', async () => {
+    const options = [{ optionId: 'always', name: 'Always', kind: 'allow_always' }]
+    const automatic = new AcpProcessRuntime({ ...driver(), permissionPolicy: 'allow' }, createSink() as any)
+    assert.deepEqual((automatic as any).requestPermission({ toolCall: { toolCallId: 't' }, options }), { outcome: { outcome: 'cancelled' } })
+    const sink = createSink()
+    const manual = new AcpProcessRuntime(driver(), sink as any)
+    const response = (manual as any).requestPermission({ toolCall: { toolCallId: 't' }, options })
+    await assert.rejects(manual.respondPending({ requestId: sink.pendingRequest.id, action: 'accept' }), /explicit optionId/)
+    assert.equal(sink.state, 'permission_required')
+    await manual.respondPending({ requestId: sink.pendingRequest.id, action: 'accept', optionId: 'always' })
+    assert.deepEqual(await response, { outcome: { outcome: 'selected', optionId: 'always' } })
+    const onceSink = createSink()
+    const once = new AcpProcessRuntime(driver(), onceSink as any)
+    const preferred = (once as any).requestPermission({ toolCall: { toolCallId: 't' }, options: [...options, { optionId: 'once', name: 'Once', kind: 'allow_once' }] })
+    await once.respondPending({ requestId: onceSink.pendingRequest.id, action: 'accept' })
+    assert.deepEqual(await preferred, { outcome: { outcome: 'selected', optionId: 'once' } })
+    for (const [permanentId, onceId] of [['ALLOWED', 'allowed'], ['always', '1'], ['choice', ' choice ']]) {
+        const opaqueSink = createSink()
+        const opaque = new AcpProcessRuntime(driver(), opaqueSink as any)
+        const result = (opaque as any).requestPermission({ toolCall: { toolCallId: 't' }, options: [
+            { optionId: permanentId, name: 'Permanent', kind: 'allow_always' },
+            { optionId: onceId, name: 'Once', kind: 'allow_once' }
+        ] })
+        await opaque.respondPending({ requestId: opaqueSink.pendingRequest.id, optionId: onceId })
+        assert.deepEqual(await result, { outcome: { outcome: 'selected', optionId: onceId } })
+    }
+})
+
 test('a canceled prompt cannot overwrite the terminal canceled state', async () => {
     const sink = createSink()
     const runtime = new AcpProcessRuntime(driver(), sink as any)

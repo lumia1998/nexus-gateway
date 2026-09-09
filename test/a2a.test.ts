@@ -155,6 +155,243 @@ test('A2A message-only streams finish with proof, but task streams require a ter
     assert.equal(taskSink.completion, undefined)
 })
 
+test('A2A timeoutMs covers a slow non-SSE Card body', async () => {
+    const server = http.createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.write('{"name":"slow"')
+        setTimeout(() => response.end('}'), 180)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+        const result = await probeA2AAgent('slow', {
+            protocol: 'a2a',
+            agentCardUrl: `${base}/card`,
+            timeoutMs: 60,
+            streamIdleTimeoutMs: 500
+        })
+        assert.equal(result.ready, false)
+        assert.match(result.error || '', /A2A request timed out|timed out/i)
+    } finally {
+        await closeServer(server)
+    }
+})
+
+test('A2A SSE remains alive past timeoutMs while events make progress', async () => {
+    let base = ''
+    const server = http.createServer(async (request, response) => {
+        if (request.url === '/card') {
+            response.setHeader('Content-Type', 'application/json')
+            response.end(JSON.stringify(agentCard(base)))
+            return
+        }
+        if (request.method !== 'POST') {
+            response.writeHead(404).end()
+            return
+        }
+        const body = await requestBody(request)
+        const rpc = JSON.parse(body) as { id: number; method: string }
+        if (request.headers.accept?.startsWith('text/event-stream')) {
+            response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+            const event = (result: unknown) =>
+                response.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result })}\n\n`)
+            event({ statusUpdate: workingStatus() })
+            setTimeout(() => event({ message: agentMessage('done') }), 240)
+            setTimeout(() => {
+                event({ statusUpdate: completedStatus() })
+                response.end()
+            }, 300)
+            return
+        }
+        response.writeHead(404).end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const sink = createSink()
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: `${base}/card`,
+            preferredTransport: 'jsonrpc',
+            timeoutMs: 100,
+            taskTimeoutMs: 1_500,
+            streamIdleTimeoutMs: 500
+        },
+        sink as any,
+        1_500
+    )
+    try {
+        await runtime.start()
+        await runtime.prompt('Work')
+        assert.equal(sink.state, 'completed')
+        assert.equal(sink.output, 'done')
+    } finally {
+        await runtime.dispose()
+        await closeServer(server)
+    }
+})
+
+test('A2A SSE stall uses streamIdleTimeoutMs and a task deadline remains independent', async () => {
+    let base = ''
+    const server = http.createServer(async (request, response) => {
+        if (request.url === '/card') {
+            response.setHeader('Content-Type', 'application/json')
+            response.end(JSON.stringify(agentCard(base)))
+            return
+        }
+        if (request.method !== 'POST') {
+            response.writeHead(404).end()
+            return
+        }
+        const body = await requestBody(request)
+        const rpc = JSON.parse(body) as { id: number; method: string }
+        if (request.headers.accept?.startsWith('text/event-stream')) {
+            response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+            response.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { statusUpdate: workingStatus() } })}\n\n`)
+            setTimeout(() => response.end(), 500)
+            return
+        }
+        response.writeHead(404).end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const sink = createSink()
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: `${base}/card`,
+            preferredTransport: 'jsonrpc',
+            timeoutMs: 1_000,
+            taskTimeoutMs: 1_500,
+            streamIdleTimeoutMs: 100
+        },
+        sink as any,
+        1_500
+    )
+    try {
+        await runtime.start()
+        await runtime.prompt('Work')
+        assert.equal(sink.state, 'failed')
+        assert.match(sink.error || '', /stream made no progress/i)
+    } finally {
+        await runtime.dispose()
+        await closeServer(server)
+    }
+})
+
+test('A2A cancellation aborts a live HTTP stream and sends a bounded cancel request', async () => {
+    let base = ''
+    let streamStarted!: () => void
+    const started = new Promise<void>((resolve) => { streamStarted = resolve })
+    let cancelSeen = false
+    const server = http.createServer(async (request, response) => {
+        if (request.url === '/card') {
+            response.setHeader('Content-Type', 'application/json')
+            response.end(JSON.stringify(agentCard(base)))
+            return
+        }
+        if (request.method !== 'POST') {
+            response.writeHead(404).end()
+            return
+        }
+        const rpc = JSON.parse(await requestBody(request)) as { id: number }
+        if (request.headers.accept?.startsWith('text/event-stream')) {
+            response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+            response.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { statusUpdate: workingStatus() } })}\n\n`)
+            streamStarted()
+            return
+        }
+        cancelSeen = true
+        response.setHeader('Content-Type', 'application/json')
+        response.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+                id: 'task-1',
+                contextId: 'context-1',
+                status: { state: 'TASK_STATE_CANCELED' },
+                artifacts: [],
+                history: []
+            }
+        }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const sink = createSink()
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: `${base}/card`,
+            preferredTransport: 'jsonrpc',
+            timeoutMs: 200,
+            taskTimeoutMs: 2_000,
+            streamIdleTimeoutMs: 1_000
+        },
+        sink as any,
+        2_000
+    )
+    try {
+        await runtime.start()
+        const prompt = runtime.prompt('Work')
+        await started
+        await waitUntil(() => sink.protocolSessionId === 'task-1')
+        await runtime.cancel()
+        await prompt
+        assert.equal(cancelSeen, true)
+        assert.equal(sink.state, 'canceled')
+    } finally {
+        await runtime.dispose()
+        await closeServer(server)
+    }
+})
+
+test('A2A taskTimeoutMs ends a progressing stream after the total task deadline', async () => {
+    let base = ''
+    const server = http.createServer(async (request, response) => {
+        if (request.url === '/card') {
+            response.setHeader('Content-Type', 'application/json')
+            response.end(JSON.stringify(agentCard(base)))
+            return
+        }
+        if (request.method !== 'POST') {
+            response.writeHead(404).end()
+            return
+        }
+        const rpc = JSON.parse(await requestBody(request)) as { id: number }
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        const event = () => response.write(`data: ${JSON.stringify({
+            jsonrpc: '2.0', id: rpc.id, result: { statusUpdate: workingStatus() }
+        })}\n\n`)
+        event()
+        const interval = setInterval(event, 35)
+        response.on('close', () => clearInterval(interval))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const sink = createSink()
+    const runtime = new A2AClientRuntime(
+        {
+            protocol: 'a2a',
+            agentCardUrl: `${base}/card`,
+            preferredTransport: 'jsonrpc',
+            timeoutMs: 80,
+            taskTimeoutMs: 220,
+            streamIdleTimeoutMs: 500
+        },
+        sink as any,
+        220
+    )
+    try {
+        await runtime.start()
+        await runtime.prompt('Work')
+        assert.equal(sink.state, 'failed')
+        assert.match(sink.error || '', /A2A task timed out/i)
+    } finally {
+        await runtime.dispose()
+        await closeServer(server)
+    }
+})
+
 function runtimeWithResponses(sink: ReturnType<typeof createSink>, responses: any[]) {
     const runtime = new A2AClientRuntime(
         {
@@ -223,4 +460,78 @@ function textPart(value: string) {
         filename: '',
         mediaType: 'text/plain'
     }
+}
+
+function agentCard(base: string) {
+    return {
+        name: 'HTTP test agent',
+        supportedInterfaces: [
+            {
+                url: base,
+                protocolBinding: 'JSONRPC',
+                tenant: '',
+                protocolVersion: '1.0'
+            }
+        ],
+        version: '1.0.0',
+        capabilities: { streaming: true, pushNotifications: false, extensions: [] },
+        securitySchemes: {},
+        securityRequirements: [],
+        defaultInputModes: ['text/plain'],
+        defaultOutputModes: ['text/plain'],
+        skills: [],
+        signatures: []
+    }
+}
+
+function workingStatus() {
+    return {
+        taskId: 'task-1',
+        contextId: 'context-1',
+        status: { state: 'TASK_STATE_WORKING' }
+    }
+}
+
+function completedStatus() {
+    return {
+        taskId: 'task-1',
+        contextId: 'context-1',
+        status: { state: 'TASK_STATE_COMPLETED' }
+    }
+}
+
+function agentMessage(value: string) {
+    return {
+        messageId: `message-${value}`,
+        contextId: 'context-1',
+        taskId: 'task-1',
+        role: 'ROLE_AGENT',
+        parts: [{ text: value }]
+    }
+}
+
+function requestBody(request: import('node:http').IncomingMessage) {
+    return new Promise<string>((resolve, reject) => {
+        let body = ''
+        request.setEncoding('utf8')
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => resolve(body))
+        request.on('error', reject)
+    })
+}
+
+function closeServer(server: http.Server) {
+    return new Promise<void>((resolve) => {
+        server.close(() => resolve())
+        server.closeAllConnections?.()
+    })
+}
+
+async function waitUntil(check: () => boolean) {
+    const deadline = Date.now() + 1_000
+    while (Date.now() < deadline) {
+        if (check()) return
+        await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    throw new Error('Timed out waiting for A2A state')
 }

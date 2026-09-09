@@ -1,27 +1,51 @@
+// @ts-check
 import { showLogin } from './screens.js'
+import { state } from './state.js'
 
-export async function api(path, options) {
-  const settings = Object.assign({ credentials: 'same-origin' }, options || {})
-  settings.headers = Object.assign({}, settings.headers || {})
-  if (settings.body && typeof settings.body !== 'string') {
-    settings.headers['Content-Type'] = 'application/json'
-    settings.body = JSON.stringify(settings.body)
-  }
-  const response = await fetch(path, settings)
-  let value = null
-  try { value = await response.json() } catch {}
-  if (!response.ok) {
-    if (response.status === 401 && path.indexOf('/v1/admin/') === 0) showLogin()
-    const message = value && value.error ? value.error : '请求失败（HTTP ' + response.status + '）'
-    const error = new Error(localizeError(message))
-    error.status = response.status
-    throw error
-  }
-  return value
+export class ApiError extends Error {
+  /** @param {string} message @param {number} status */
+  constructor(message, status) { super(message); this.status = status }
 }
 
+/**
+ * @template [T=unknown]
+ * @param {string} path
+ * @param {import('./contracts.js').ApiOptions} [options]
+ * @returns {Promise<T>}
+ */
+export async function api(path, options) {
+  const epoch = state.authEpoch
+  const headers = new Headers(options?.headers)
+  let body = options?.body
+  if (body && typeof body !== 'string') { headers.set('Content-Type', 'application/json'); body = JSON.stringify(body) }
+  /** @type {RequestInit} */
+  const settings = { credentials: 'same-origin', ...options, headers, body }
+  // Only read requests get an automatic timeout; a timed-out mutation has an
+  // ambiguous outcome and must not encourage a blind retry.
+  if ((!settings.method || settings.method === 'GET') && !settings.signal) settings.signal = AbortSignal.timeout(15_000)
+  let response
+  try { response = await fetch(path, settings) }
+  catch (reason) {
+    throw new Error(reason instanceof Error && reason.name === 'TimeoutError' ? '请求超时，显示的可能是旧数据' : '无法连接网关，请检查网络；写入结果请刷新核实')
+  }
+  /** @type {unknown} */
+  let value = null
+  try { value = await response.json() } catch {}
+  if (epoch !== state.authEpoch) throw new Error('登录状态已变化，请重新登录后核实操作结果')
+  if (!response.ok) {
+    if (response.status === 401 && path.indexOf('/v1/admin/') === 0 && epoch === state.authEpoch) showLogin()
+    const message = value && typeof value === 'object' && 'error' in value && typeof value.error === 'string' ? value.error : '请求失败（HTTP ' + response.status + '）'
+    throw new ApiError(localizeError(message), response.status)
+  }
+  return /** @type {T} */ (value)
+}
+
+/** @param {string} message */
 export function localizeError(message) {
+  /** @type {Record<string, string>} */
   const messages = {
+    'Invalid setup token': '初始化令牌不正确，请从网关启动终端复制当前 Setup token',
+    'Console Host is not allowed': '此控制台地址未获允许，请在本地配置 publicOrigins 后重启网关',
     'Invalid Console Password': '控制台密码不正确',
     'Console setup is required': '请先完成控制台初始化',
     'Console setup is already complete': '控制台已完成初始化',
@@ -69,13 +93,16 @@ export function localizeError(message) {
   if (timeout) return '超时时间必须介于 ' + Math.round(Number(timeout[1]) / 1000) + ' 和 ' + Math.round(Number(timeout[2]) / 1000) + ' 秒之间'
   const runtimeRange = /^(sessionTtlMs|promptTimeoutMs|cleanupIntervalMs) must be between (\d+) and (\d+)$/.exec(message)
   if (runtimeRange) {
+    /** @type {Record<string, [string, string, number]>} */
     const units = {
       sessionTtlMs: ['会话空闲有效期', '小时', 3_600_000],
       promptTimeoutMs: ['ACP 任务超时', '分钟', 60_000],
       cleanupIntervalMs: ['清理任务周期', '秒', 1000]
     }
     const [label, unit, divisor] = units[runtimeRange[1]]
-    return label + '必须介于 ' + Math.round(Number(runtimeRange[2]) / divisor) + ' 和 ' + Math.round(Number(runtimeRange[3]) / divisor) + ' ' + unit + '之间'
+    /** @param {string} value */
+    const display = (value) => Number((Number(value) / divisor).toFixed(7))
+    return label + '必须介于 ' + display(runtimeRange[2]) + ' 和 ' + display(runtimeRange[3]) + ' ' + unit + '之间'
   }
   return message
 }

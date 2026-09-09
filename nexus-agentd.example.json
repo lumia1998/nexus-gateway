@@ -17,7 +17,26 @@
   "maxSseConnections": 128,
   "maxConnections": 256,
   "sessionTtlMs": 86400000,
+  "quotas": {
+    "maxSessionsPerKey": 16,
+    "maxRunningRunsPerKey": 4,
+    "maxSsePerKey": 8,
+    "maxUploadBytesPerKey": 33554432
+  },
+  "history": { "maxRuns": 1000, "retentionDays": 30, "maxBytes": 67108864 },
+  "artifacts": { "retentionDays": 30, "maxBytes": 536870912, "maxArtifactBytes": 12582912, "maxQueuedBytes": 67108864 },
   "agents": {
+    "custom": {
+      "protocol": "acp",
+      "driver": "stdio",
+      "name": "Custom ACP",
+      "enabled": false,
+      "command": "your-acp-agent",
+      "args": [],
+      "probeArgs": ["--version"],
+      "workspace": "/data/repos/project",
+      "permissionPolicy": "ask"
+    },
     "codex": {
       "protocol": "acp",
       "driver": "codex",

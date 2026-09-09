@@ -127,7 +127,7 @@ h1, h2, h3, p { margin: 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; padding: 0; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 .muted { color: hsl(var(--muted-foreground)); font-size: var(--fs-xs); }
 
 :focus-visible {
@@ -366,6 +366,8 @@ tr[data-run-detail] { cursor: pointer; }
 .error-detail { color: hsl(var(--destructive-text)); font-size: var(--fs-sm); overflow-wrap: anywhere; line-height: 1.4; }
 .row-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .agent-table { min-width: 1050px; table-layout: fixed; }
+.connection-status { padding: var(--sp-3) var(--sp-4); border: 1px solid currentColor; border-radius: var(--radius-lg); color: hsl(var(--destructive-text)); margin-bottom: var(--sp-4); overflow-wrap: anywhere; }
+.run-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 .agent-table th:nth-child(1) { width: 22%; }
 .agent-table th:nth-child(2) { width: 8%; }
 .agent-table th:nth-child(3), .agent-table th:nth-child(4), .agent-table th:nth-child(6) { width: 10%; }
@@ -457,6 +459,13 @@ tr[data-run-detail] { cursor: pointer; }
 .run-task-cell small { display: block; margin-top: 2px; color: hsl(var(--muted-foreground)); font-size: var(--fs-2xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Run detail (drawer) */
+.run-detail-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.run-output-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.run-output-heading h3 { margin: 0; }
+.run-pending { padding: var(--sp-3); margin-bottom: var(--sp-4); border: 1px solid hsl(var(--border)); border-radius: var(--radius); }
+.run-pending-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-pending h3 { font-size: var(--fs-md); }
+.run-pending .row-actions { flex-wrap: wrap; }
 .run-detail-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
   margin-bottom: var(--sp-4);
@@ -733,6 +742,42 @@ tr[data-run-detail] { cursor: pointer; }
   .drawer { width: 100%; }
   .run-detail-grid { grid-template-columns: 1fr; }
   .toast-region { right: var(--sp-4); bottom: var(--sp-4); left: var(--sp-4); max-width: none; }
+}
+
+/* Keep row actions and task context in the viewport on laptops and phones. */
+@media (max-width: 1400px) {
+  .agent-table, .run-table { min-width: 0; }
+  .agent-table thead, .run-table thead {
+    position: absolute; width: 1px; height: 1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .agent-table tbody, .run-table tbody { display: grid; }
+  .agent-table tbody tr, .run-table tbody tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--sp-3) var(--sp-6); padding: var(--sp-4); border-bottom: 1px solid hsl(var(--border));
+  }
+  .agent-table td, .run-table td {
+    min-width: 0; max-width: none !important; padding: 0; height: auto;
+    border: 0; white-space: normal !important; overflow-wrap: anywhere; text-align: left !important;
+  }
+  .agent-table td::before, .run-table td::before { display: block; font-size: var(--fs-xs); color: hsl(var(--muted-foreground)); margin-bottom: var(--sp-1); }
+  .agent-table td:nth-child(2)::before { content: '协议'; }
+  .agent-table td:nth-child(3)::before { content: '驱动'; }
+  .agent-table td:nth-child(4)::before { content: '探测状态'; }
+  .agent-table td:nth-child(5)::before { content: '默认工作区'; }
+  .agent-table td:nth-child(6)::before { content: '权限策略'; }
+  .run-table td:nth-child(2)::before { content: '任务'; }
+  .run-table td:nth-child(3)::before { content: '结果'; }
+  .run-table td:nth-child(4)::before { content: '状态'; }
+  .run-table td:nth-child(5)::before { content: '开始时间'; }
+  .run-table td:nth-child(6)::before { content: '耗时'; }
+  .agent-table td:last-child, .run-table td:last-child, td[colspan] { grid-column: 1 / -1; }
+  .agent-table .row-actions { justify-content: flex-start; }
+  .agent-table .button.small, .run-table .button.small { min-height: 36px; }
+}
+@media (max-width: 560px) {
+  .agent-table tbody tr, .run-table tbody tr { grid-template-columns: minmax(0, 1fr); }
+  .run-pagination { align-items: flex-start; }
 }
 
 /* ── Reduced motion ───────────────────────────────────────────────── */

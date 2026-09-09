@@ -13,8 +13,16 @@ export async function startAgentd(configPath: string) {
     const config = await loadAgentdConfig(absoluteConfigPath)
     const runStore = new RunStore(
         runStorePathForConfig(absoluteConfigPath),
-        1000,
-        config.maxRequestBytes
+        {
+            maxRuns: config.history?.maxRuns ?? 1000,
+            maxTaskChars: config.maxRequestBytes,
+            historyRetentionDays: config.history?.retentionDays ?? 30,
+            historyMaxBytes: config.history?.maxBytes ?? 64 * 1024 * 1024,
+            retentionDays: config.artifacts?.retentionDays ?? 30,
+            maxTotalBytes: config.artifacts?.maxBytes ?? 512 * 1024 * 1024,
+            maxArtifactBytes: config.artifacts?.maxArtifactBytes ?? 12 * 1024 * 1024,
+            maxQueuedBytes: config.artifacts?.maxQueuedBytes ?? 64 * 1024 * 1024
+        }
     )
     await runStore.init()
     const workspacePolicy = await WorkspacePolicy.create(config.workspaceRoots)

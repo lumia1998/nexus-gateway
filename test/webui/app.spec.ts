@@ -1,52 +1,4 @@
-import { test as base, expect } from '@playwright/test'
-import http from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { writeAgentdWebUi, writeAgentdWebUiModule } from '../../src/webui/index.js'
-
-// Serve the shipped HTML, CSP and modules. Only API responses are fixtures;
-// all DOM, IME events, keyboard navigation and focus run in Chromium.
-const test = base.extend<{}, { gatewayUrl: string }>({
-    gatewayUrl: [async ({}, use) => {
-        const server = http.createServer((request, response) => {
-            if (request.url === '/ui/') writeAgentdWebUi(response)
-            else writeAgentdWebUiModule(response, request.url || '')
-        })
-        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-        try { await use(`http://127.0.0.1:${(server.address() as AddressInfo).port}`) }
-        finally {
-            server.closeAllConnections()
-            await new Promise<void>((resolve) => server.close(() => resolve()))
-        }
-    }, { scope: 'worker' }]
-})
-
-const agents = [
-    { id: 'writer', name: '写作助手', protocol: 'acp', driver: 'codex', enabled: true, workspace: '/workspace/project' },
-    { id: 'research', name: '研究助手', protocol: 'a2a', enabled: true }
-]
-const config = { agents, driverKinds: ['codex'], workspaceRoots: ['/workspace', '/spare'] }
-const runs = [
-    { id: 'active', agentId: 'writer', agentName: '写作助手', protocol: 'acp', task: '中文任务', state: 'permission_required', progress: {}, startedAt: Date.now() - 30_000 },
-    { id: 'done', agentId: 'research', agentName: '研究助手', protocol: 'a2a', task: '历史任务', state: 'completed', progress: { phase: '已完成' }, startedAt: 1_700_000_000_000, durationMs: 10_000 }
-]
-const key = { id: 'key-1', name: '旧客户端', legacy: true, enabled: true, suffix: '1234', scope: { allAgents: true, agentIds: [] } }
-
-test.beforeEach(async ({ page, gatewayUrl }) => {
-    await page.route('**/v1/**', async (route) => {
-        const path = new URL(route.request().url()).pathname
-        const data = path === '/v1/bootstrap/status' ? { adminSetupRequired: false }
-            : path === '/v1/admin/auth/status' ? { authenticated: true }
-            : path === '/v1/admin/config' ? config
-            : path === '/v1/admin/api-keys' ? { apiKeys: [key] }
-            : path === '/v1/admin/overview' ? { agents: agents.map((agent) => ({ ...agent, ready: true })), sessions: 1 }
-            : path === '/v1/admin/runs' ? { runs, total: 240, stats: { active: 60, completed: 60, failed: 60 } }
-            : path.startsWith('/v1/admin/runs/') ? runs.find((run) => run.id === path.split('/').pop())
-            : {}
-        await route.fulfill({ json: data })
-    })
-    await page.goto(gatewayUrl + '/ui/')
-    await expect(page.locator('#app')).toBeVisible()
-})
+import { test, expect, agents, config, runs, key } from './fixtures.js'
 
 for (const target of ['runs', 'agents']) {
     test(`${target}: polling preserves composition, selection, filters and topbar focus`, async ({ page }) => {
@@ -119,6 +71,474 @@ test('page slots clear on navigation and empty data; announcements avoid unchang
     await expect(page.locator('#page-toolbar')).toBeEmpty()
     await expect(page.locator('#page-stats')).toBeEmpty()
     await expect(page.locator('#page-results')).toContainText('暂无运行记录')
+})
+
+test('settings runtime and password forms validate and save independently', async ({ page }) => {
+    const writes: string[] = []
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        writes.push('runtime')
+        await route.fulfill({ json: { ...config, ...route.request().postDataJSON() } })
+    })
+    await page.route('**/v1/admin/password', async (route) => {
+        writes.push('password')
+        await route.fulfill({ status: 403, json: { error: 'Current Console Password is incorrect' } })
+    })
+    await page.locator('[data-page="settings"]').click()
+    await page.locator('#session-ttl-hours').fill('48')
+    await page.locator('#settings-current-password').fill('old-password-value')
+    await page.locator('#settings-new-password').fill('new-password-value')
+    await page.locator('#settings-confirm-password').fill('different-password')
+    await page.locator('#password-save').click()
+    await expect(page.locator('#password-form [data-password-error]')).toContainText('不一致')
+    expect(writes).toEqual([])
+    await page.locator('#settings-confirm-password').fill('new-password-value')
+    await page.locator('#password-save').click()
+    await expect(page.locator('#password-form [data-password-error]')).toContainText('控制台密码不正确')
+    expect(writes).toEqual(['password'])
+    await page.getByRole('button', { name: '保存更改', exact: true }).click()
+    await expect(page.locator('#toast-status')).toContainText('运行参数已保存')
+    expect(writes).toEqual(['password', 'runtime'])
+    expect(await page.evaluate(async () => (await import('/ui/app/state.js')).state.config.sessionTtlMs)).toBe(48 * 3_600_000)
+})
+
+test('slow overview probes do not block the authenticated shell or settings', async ({ page }) => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    await page.route('**/v1/admin/overview', async (route) => {
+        await pending
+        await route.fulfill({ json: { agents: agents.map((agent) => ({ ...agent, ready: true })), sessions: 1 } })
+    })
+    const writes: any[] = []
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        writes.push(route.request().postDataJSON())
+        await route.fulfill({ json: { ...config, ...route.request().postDataJSON() } })
+    })
+    await page.reload()
+    await expect(page.locator('#app')).toBeVisible()
+    await page.locator('[data-page="settings"]').click()
+    await expect(page.locator('#settings-form')).toBeVisible()
+    await page.locator('#session-ttl-hours').fill('1.5')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#toast-status')).toContainText('运行参数已保存')
+    expect(writes).toHaveLength(1)
+    release()
+})
+
+test('password save is independent from invalid runtime fields', async ({ page }) => {
+    const writes: string[] = []
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        writes.push('runtime')
+        await route.fulfill({ json: { ...config, ...route.request().postDataJSON() } })
+    })
+    await page.route('**/v1/admin/password', async (route) => {
+        writes.push('password')
+        await route.fulfill({ json: { changed: true } })
+    })
+    await page.locator('[data-page="settings"]').click()
+    await page.locator('#session-ttl-hours').fill('0')
+    await page.locator('#settings-current-password').fill('old-password-value')
+    await page.locator('#settings-new-password').fill('new-password-value')
+    await page.locator('#settings-confirm-password').fill('new-password-value')
+    await page.locator('#password-save').click()
+    await expect(page.locator('#login-screen')).toBeVisible()
+    expect(writes).toEqual(['password'])
+})
+
+test('runtime settings preserve sub-unit values without a password write', async ({ page }) => {
+    let payload: any
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        payload = route.request().postDataJSON()
+        await route.fulfill({ json: { ...config, ...payload } })
+    })
+    await page.locator('[data-page="settings"]').click()
+    await page.locator('#session-ttl-hours').fill('1.5')
+    await page.locator('#prompt-timeout-minutes').fill('0.1666667')
+    await page.locator('#cleanup-interval-seconds').fill('5.123')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#toast-status')).toContainText('运行参数已保存')
+    expect(payload).toMatchObject({ sessionTtlMs: 5_400_000, promptTimeoutMs: 10_000, cleanupIntervalMs: 5123 })
+})
+
+test('successive runtime saves can restore the original value without redundant writes', async ({ page }) => {
+    const writes: any[] = []
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        writes.push(route.request().postDataJSON())
+        await route.fulfill({ json: { ...config, ...writes.at(-1) } })
+    })
+    await page.locator('[data-page="settings"]').click()
+    const ttl = page.locator('#session-ttl-hours')
+    await expect(ttl).toHaveValue('24')
+    await ttl.fill('1.5')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#settings-form')).toHaveAttribute('data-dirty', 'false')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#toast-status')).toContainText('没有需要保存的运行参数更改')
+    expect(writes).toHaveLength(1)
+    await ttl.fill('24')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#settings-form')).toHaveAttribute('data-dirty', 'false')
+    expect(writes.map((value) => value.sessionTtlMs)).toEqual([5_400_000, 86_400_000])
+})
+
+test('editing existing stdio settings preserves precision without exposing local command fields', async ({ page }) => {
+    const stdio = { ...agents[0], driver: 'stdio', permissionPolicy: 'ask', permissionTimeoutMs: 12_345 }
+    await page.route('**/v1/admin/config', (route) => route.fulfill({ json: { ...config, agents: [stdio], driverKinds: ['stdio', 'codex'] } }))
+    let payload: any
+    await page.route('**/v1/admin/agents/writer', async (route) => {
+        payload = route.request().postDataJSON()
+        await route.fulfill({ json: stdio })
+    })
+    await page.reload()
+    await page.locator('[data-page="agents"]').click()
+    await page.locator('[data-agent-edit="writer"]').click()
+    await expect(page.locator('#f-driver')).toHaveValue('stdio')
+    await expect(page.locator('#f-permissionTimeoutMs')).toHaveValue('12.345')
+    await expect(page.locator('#drawer [name="command"], #drawer [name="args"], #drawer [name="env"]')).toHaveCount(0)
+    await page.locator('#f-name').fill('更新名称')
+    await page.locator('#drawer-footer [type="submit"]').click()
+    await expect(page.locator('#drawer')).toBeHidden()
+    expect(payload).toEqual({ protocol: 'acp', name: '更新名称', description: '', enabled: true, driver: 'stdio', workspace: '/workspace/project', permissionPolicy: 'ask', permissionTimeoutMs: 12_345 })
+})
+
+test('an initial config failure cannot save fallback runtime defaults', async ({ page }) => {
+    let runtimeWrites = 0
+    await page.route('**/v1/admin/config', (route) => route.abort('connectionfailed'))
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        runtimeWrites++
+        await route.fulfill({ json: config })
+    })
+    await page.reload()
+    await expect(page.locator('#app')).toBeVisible()
+    await page.locator('[data-page="settings"]').click()
+    await expect(page.locator('#settings-save')).toBeDisabled()
+    await page.locator('#settings-form').evaluate((form) => (form as HTMLFormElement).requestSubmit())
+    expect(runtimeWrites).toBe(0)
+})
+
+test('a slow probe completion does not replace a dirty settings form', async ({ page }) => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    await page.route('**/v1/admin/overview', async (route) => {
+        await pending
+        await route.fulfill({ json: { agents: agents.map((agent) => ({ ...agent, ready: true })), sessions: 1 } })
+    })
+    await page.reload()
+    await page.locator('[data-page="settings"]').click()
+    await page.locator('#session-ttl-hours').fill('1.5')
+    release()
+    await expect(page.locator('#session-ttl-hours')).toHaveValue('1.5')
+})
+
+test('late config enables runtime editing without replacing password input or focus', async ({ page }) => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    await page.route('**/v1/admin/config', async (route) => {
+        await pending
+        await route.fulfill({ json: { ...config, sessionTtlMs: 5_400_000 } })
+    })
+    let payload: any
+    await page.route('**/v1/admin/config/runtime', async (route) => {
+        payload = route.request().postDataJSON()
+        await route.fulfill({ json: { ...config, ...payload } })
+    })
+    await page.reload()
+    await page.locator('[data-page="settings"]').click()
+    await expect(page.locator('#session-ttl-hours')).toBeDisabled()
+    const password = page.locator('#settings-new-password')
+    await password.fill('in-progress-password')
+    const original = await password.elementHandle()
+    release()
+    await expect(page.locator('#session-ttl-hours')).toBeEnabled()
+    await expect(page.locator('#session-ttl-hours')).toHaveValue('1.5')
+    await expect(password).toBeFocused()
+    expect(await original!.evaluate((element) => element.isConnected)).toBe(true)
+    await expect(password).toHaveValue('in-progress-password')
+    await page.locator('#session-ttl-hours').fill('2')
+    await page.locator('#settings-save').click()
+    await expect(page.locator('#toast-status')).toContainText('运行参数已保存')
+    expect(payload.sessionTtlMs).toBe(7_200_000)
+})
+
+test('unread config cannot replace workspace roots and retry restores editing', async ({ page }) => {
+    await page.route('**/v1/admin/config', (route) => route.abort('connectionfailed'))
+    await page.reload()
+    await page.locator('[data-page="workspaces"]').click()
+    await expect(page.locator('#page-results')).toContainText('工作区配置读取失败')
+    await expect(page.locator('#add-workspace')).toBeDisabled()
+    await page.locator('[data-page="agents"]').click()
+    await expect(page.locator('#add-agent')).toBeDisabled()
+    await page.route('**/v1/admin/config', (route) => route.fulfill({ json: config }))
+    await page.locator('[data-resource-retry="config"]').click()
+    await expect(page.locator('#add-agent')).toBeEnabled()
+    await page.locator('[data-page="workspaces"]').click()
+    await expect(page.locator('#add-workspace')).toBeEnabled()
+    await expect(page.locator('#page-results')).toContainText('/spare')
+})
+
+test('clearing run filters updates the retained controls and sends one unfiltered read', async ({ page }) => {
+    await page.locator('[data-page="runs"]').click()
+    await expect(page.locator('#clear-run-filters')).toBeHidden()
+    await page.locator('#run-search').fill('历史')
+    await expect(page.locator('#clear-run-filters')).toBeVisible()
+    await page.locator('#run-agent-filter').selectOption('research')
+    await page.locator('#run-status-filter').selectOption('completed')
+    const requests: string[] = []
+    await page.route('**/v1/admin/runs?*', async (route) => {
+        requests.push(new URL(route.request().url()).search)
+        await route.fulfill({ json: { runs, total: 2, stats: { active: 1, completed: 1, failed: 0 } } })
+    })
+    await page.locator('#clear-run-filters').click()
+    await expect(page.locator('#run-search')).toHaveValue('')
+    await expect(page.locator('#run-agent-filter')).toHaveValue('all')
+    await expect(page.locator('#run-status-filter')).toHaveValue('all')
+    await expect(page.locator('#clear-run-filters')).toBeHidden()
+    await expect(page.locator('.run-pagination')).toContainText('共 2 条')
+    expect(requests).toEqual(['?limit=50'])
+})
+
+test('key rotation shows the new secret even when subsequent list reads are unavailable', async ({ page }) => {
+    await page.locator('[data-page="keys"]').click()
+    await expect(page.locator('[data-key-menu]')).toBeVisible()
+    await page.route('**/v1/admin/api-keys', (route) => route.abort('connectionfailed'))
+    let writes = 0
+    await page.route('**/v1/admin/api-keys/key-1/regenerate', async (route) => {
+        writes++
+        await route.fulfill({ json: { key: { ...key, suffix: '9876' }, secret: 'nx_sk_rotated_test_9876' } })
+    })
+    await page.locator('[data-key-menu]').click()
+    await page.locator('[data-key-action="regenerate"]').click()
+    await page.locator('#drawer-footer [type="submit"]').click()
+    await expect(page.locator('#drawer-title')).toHaveText('API 密钥已重新生成')
+    await expect(page.locator('.secret-value')).toHaveText('nx_sk_rotated_test_9876')
+    await page.locator('#drawer-close').click()
+    await expect(page.locator('.key-secret-cell')).toContainText('9876')
+    expect(writes).toBe(1)
+})
+
+test('a key list read started before rename cannot overwrite the saved name', async ({ page }) => {
+    await page.locator('[data-page="keys"]').click()
+    await expect(page.locator('[data-key-action="rename"]')).toBeVisible()
+    let release!: () => void
+    let started!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    const startedRead = new Promise<void>((resolve) => { started = resolve })
+    await page.route('**/v1/admin/api-keys', async (route) => {
+        started()
+        await pending
+        await route.fulfill({ json: { apiKeys: [key] } })
+    })
+    await page.evaluate(() => {
+        ;(window as any).staleKeyRead = import('/ui/app/data.js').then((data) => data.retryResource('apiKeys'))
+    })
+    await startedRead
+    await page.route('**/v1/admin/api-keys/key-1', (route) => route.fulfill({ json: { ...key, name: '新客户端' } }))
+    await page.locator('[data-key-action="rename"]').click()
+    await page.locator('#f-key-name').fill('新客户端')
+    await page.locator('#drawer-footer [type="submit"]').click()
+    await expect(page.locator('#drawer')).toBeHidden()
+    await expect(page.locator('#page-results')).toContainText('新客户端')
+    await page.route('**/v1/admin/api-keys', (route) => route.fulfill({ json: { apiKeys: [{ ...key, name: '新客户端' }] } }))
+    await page.evaluate(async () => (await import('/ui/app/data.js')).retryResource('apiKeys'))
+    release()
+    await page.evaluate(() => (window as any).staleKeyRead)
+    await expect(page.locator('#page-results')).toContainText('新客户端')
+    await expect(page.locator('#page-results')).not.toContainText('旧客户端')
+})
+
+test('logout clears password forms and old config before a new login', async ({ page }) => {
+    await page.locator('[data-page="settings"]').click()
+    await page.locator('#session-ttl-hours').fill('48')
+    await page.locator('#settings-new-password').fill('unfinished-password')
+    await page.locator('[data-action="logout"]').click()
+    await expect(page.locator('#login-screen')).toBeVisible()
+    await expect(page.locator('#settings-new-password')).toHaveCount(0)
+    expect(await page.evaluate(async () => (await import('/ui/app/state.js')).state.config.agents)).toEqual([])
+    await page.route('**/v1/admin/config', (route) => route.fulfill({ json: { ...config, sessionTtlMs: 5_400_000 } }))
+    await page.locator('#login-password').fill('valid-console-password')
+    await page.locator('#login-form [type="submit"]').click()
+    await expect(page.locator('#app')).toBeVisible()
+    await expect(page.locator('#session-ttl-hours')).toHaveValue('1.5')
+    await expect(page.locator('#settings-new-password')).toHaveValue('')
+})
+
+test('a key mutation completed after logout cannot reopen a secret drawer', async ({ page }) => {
+    await page.locator('[data-page="keys"]').click()
+    await page.locator('#create-key').click()
+    await page.locator('#f-name').fill('Pending client')
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    await page.route('**/v1/admin/api-keys', async (route) => {
+        await pending
+        await route.fulfill({ json: { key: { ...key, id: 'late-key' }, secret: 'nx_sk_late_test_secret' } })
+    })
+    await page.locator('#drawer-footer [type="submit"]').click()
+    await expect(page.locator('#drawer-footer [type="submit"]')).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await page.locator('[data-action="logout"]').click()
+    await expect(page.locator('#login-screen')).toBeVisible()
+    release()
+    await expect(page.locator('#toast-alert')).toContainText('登录状态已变化')
+    await expect(page.locator('#drawer')).toBeHidden()
+    expect(await page.evaluate(async () => (await import('/ui/app/state.js')).state.apiKeys)).toEqual([])
+})
+
+test('A2A timeout fields keep millisecond precision and preserve inheritance', async ({ page }) => {
+    const a2a = {
+        id: 'research', name: '研究助手', protocol: 'a2a', enabled: true,
+        agentCardUrl: 'http://agent.local/card', timeoutMs: 12_345
+    }
+    await page.route('**/v1/admin/config', (route) => route.fulfill({ json: { ...config, agents: [a2a] } }))
+    let payload: any
+    await page.route('**/v1/admin/agents/research', async (route) => {
+        payload = route.request().postDataJSON()
+        await route.fulfill({ json: a2a })
+    })
+    await page.reload()
+    await page.locator('[data-page="agents"]').click()
+    await page.locator('[data-agent-edit="research"]').click()
+    await expect(page.locator('#f-taskTimeoutMs')).toHaveValue('')
+    await expect(page.locator('#f-streamIdleTimeoutMs')).toHaveValue('')
+    await expect(page.locator('#f-timeoutMs')).toHaveValue('12.345')
+    await page.locator('#f-timeoutMs').fill('12.346')
+    await page.locator('#f-taskTimeoutMs').fill('12.345')
+    await page.locator('#f-streamIdleTimeoutMs').fill('2.001')
+    await page.locator('#drawer-footer [type="submit"]').click()
+    await expect(page.locator('#drawer')).toBeHidden()
+    expect(payload).toMatchObject({ timeoutMs: 12_346, taskTimeoutMs: 12_345, streamIdleTimeoutMs: 2_001 })
+})
+
+test('run search queries all stored records, retains empty filters, and paginates', async ({ page }) => {
+    const requests: string[] = []
+    const historical = { ...runs[1], id: 'older-than-page', task: 'ancient-needle' }
+    await page.route('**/v1/admin/runs?*', async (route) => {
+        const url = new URL(route.request().url())
+        requests.push(url.search)
+        const q = url.searchParams.get('q')
+        await route.fulfill({ json: {
+            runs: q === 'missing' ? [] : q === 'ancient-needle' || url.searchParams.has('offset') ? [historical] : runs,
+            total: q ? q === 'missing' ? 0 : 1 : 240, stats: { active: 1, completed: 239, failed: 0 }
+        } })
+    })
+    await page.locator('[data-page="runs"]').click()
+    await page.locator('#runs-next').click()
+    await expect(page.locator('#page-results')).toContainText('ancient-needle')
+    expect(requests.some((query) => query.includes('offset=50'))).toBe(true)
+    await page.locator('#run-search').fill('missing')
+    await expect(page.locator('.run-pagination')).toContainText('共 0 条')
+    await expect(page.locator('#run-search')).toBeVisible()
+    await page.locator('#run-search').fill('ancient-needle')
+    await expect(page.locator('.run-pagination')).toContainText('共 1 条')
+    await expect(page.locator('#page-results')).toContainText('ancient-needle')
+    expect(requests.at(-1)).toContain('q=ancient-needle')
+    expect(requests.at(-1)).not.toContain('offset')
+})
+
+test('stale search responses cannot replace a newer result', async ({ page }) => {
+    await page.locator('[data-page="runs"]').click()
+    await page.evaluate(async () => (await import('/ui/app/data.js')).refreshRuns(false))
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let started!: () => void
+    const start = new Promise<void>((resolve) => { started = resolve })
+    await page.route('**/v1/admin/runs?*', async (route) => {
+        const old = new URL(route.request().url()).searchParams.get('q') === 'old'
+        if (old) { started(); await gate }
+        await route.fulfill({ json: { runs: [{ ...runs[1], task: old ? 'old' : 'new' }], total: old ? 111 : 1, stats: {} } })
+    })
+    await page.evaluate(async () => {
+        const { state } = await import('/ui/app/state.js')
+        state.runSearch = 'old'
+        ;(window as any).oldRefresh = (await import('/ui/app/data.js')).refreshRuns(false)
+    })
+    await start
+    await page.evaluate(async () => {
+        (await import('/ui/app/state.js')).state.runSearch = 'new'
+        await (await import('/ui/app/data.js')).refreshRuns(false)
+    })
+    release()
+    await page.evaluate(() => (window as any).oldRefresh)
+    expect(await page.evaluate(async () => (await import('/ui/app/state.js')).state.runs[0].task)).toBe('new')
+    await expect(page.locator('.run-pagination')).toContainText('共 1 条')
+})
+
+test('offline polling shows stale data and recovery clears the warning; open details update', async ({ page }) => {
+    await page.locator('[data-page="runs"]').click()
+    await page.locator('[data-run-detail="active"]').click()
+    await expect(page.locator('#drawer-form')).toContainText('等待授权')
+    await page.route('**/v1/admin/runs/active', (route) => route.fulfill({ json: { ...runs[0], state: 'completed', output: 'finished-output' } }))
+    await page.evaluate(async () => (await import('/ui/app/data.js')).refreshRuns(false))
+    await expect(page.locator('#drawer-form')).toContainText('finished-output')
+    await expect(page.locator('#drawer-form')).toContainText('已完成')
+    await page.locator('#drawer-close').click()
+    await page.route('**/v1/admin/runs?*', (route) => route.abort('connectionfailed'))
+    await page.evaluate(async () => (await import('/ui/app/data.js')).refreshRuns(false))
+    await expect(page.locator('#connection-status')).toBeVisible()
+    await expect(page.locator('#connection-status')).toContainText('旧数据')
+    await expect(page.locator('.run-card')).toBeVisible()
+    await page.route('**/v1/admin/runs?*', (route) => route.fulfill({ json: { runs, total: 2, stats: {} } }))
+    await page.evaluate(async () => (await import('/ui/app/data.js')).refreshRuns(false))
+    await expect(page.locator('#connection-status')).toBeHidden()
+})
+
+test('same read requests coalesce without losing final state', async ({ page }) => {
+    let count = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let started!: () => void
+    const start = new Promise<void>((resolve) => { started = resolve })
+    await page.route('**/v1/admin/runs?*', async (route) => {
+        count++; started(); await gate
+        await route.fulfill({ json: { runs, total: 2, stats: {} } })
+    })
+    await page.evaluate(async () => {
+        const { refreshRuns } = await import('/ui/app/data.js')
+        ;(window as any).parallelRefresh = Promise.all([refreshRuns(false), refreshRuns(false), refreshRuns(false)])
+    })
+    await start
+    release()
+    await page.evaluate(() => (window as any).parallelRefresh)
+    expect(count).toBe(1)
+})
+
+test('agent and history actions fit laptop and phone widths; page survives reload', async ({ page }) => {
+    for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 900 })
+        await page.locator('[data-page="agents"]').click()
+        const edit = page.locator('[data-agent-edit="writer"]')
+        const bounds = await edit.boundingBox()
+        expect(bounds!.x).toBeGreaterThanOrEqual(0)
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
+        expect(await page.locator('.agent-table').evaluate((table) => table.scrollWidth <= table.clientWidth)).toBe(true)
+        await edit.click()
+        await expect(page.locator('#f-id')).toHaveValue('writer')
+        await page.locator('#drawer-close').click()
+        await page.locator('[data-page="runs"]').click()
+        const detail = await page.locator('[data-run-detail="done"]').boundingBox()
+        expect(detail!.x + detail!.width).toBeLessThanOrEqual(width)
+        await page.screenshot({ path: `test-results/hardening-runs-${width}.png`, fullPage: true })
+    }
+    await page.locator('[data-page="keys"]').click()
+    await page.reload()
+    await expect(page.locator('#page-title')).toHaveText('API 密钥')
+})
+
+test('setup requires token input and submits it without storing it', async ({ page }) => {
+    await page.route('**/v1/bootstrap/status', (route) => route.fulfill({ json: { adminSetupRequired: true } }))
+    let submitted: any
+    await page.route('**/v1/bootstrap/initialize', async (route) => {
+        submitted = route.request().postDataJSON()
+        await route.fulfill({ json: { initialized: true, adminSetupRequired: false } })
+    })
+    await page.reload()
+    await expect(page.locator('#setup-token')).toBeFocused()
+    await page.locator('#setup-token').fill('test-process-proof')
+    await page.locator('#setup-password').fill('a-test-password')
+    await page.locator('#setup-confirm').fill('a-test-password')
+    await page.getByRole('button', { name: '完成初始化' }).click()
+    await expect(page.locator('#login-screen')).toBeVisible()
+    expect(submitted.setupToken).toBe('test-process-proof')
+    expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('test-process-proof')
+    expect(page.url()).not.toContain('test-process-proof')
 })
 
 test('settings uses a centered, cardless section layout', async ({ page }) => {
@@ -301,6 +721,8 @@ test('unchanged results retain nodes while an active duration keeps updating', a
     await page.evaluate(async () => (await import('/ui/app/data.js')).refreshReadiness(false))
     expect(await edit!.evaluate((element) => element.isConnected)).toBe(true)
     await page.locator('[data-page="runs"]').click()
+    // Finish navigation's real refresh before changing the fixture clock.
+    await page.evaluate(async () => (await import('/ui/app/data.js')).refreshRuns(false))
     const duration = await page.locator('.run-meta').innerText()
     await page.evaluate(async () => {
         const { state } = await import('/ui/app/state.js')

@@ -20,7 +20,8 @@ export function createPiDriver(id: string, config: AgentdDriverConfig) {
                     command,
                     ['--version'],
                     driver.env,
-                    'Pi runtime'
+                    'Pi runtime',
+                    { ownsProcessGroup: process.platform !== 'win32' }
                 )
                 return { ...adapter, version }
             } catch (error) {

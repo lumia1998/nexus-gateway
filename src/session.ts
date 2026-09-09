@@ -2,10 +2,19 @@ import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
-import { A2AClientRuntime, probeA2AAgent } from './a2a/runtime.js'
+import { A2AClientRuntime } from './a2a/runtime.js'
 import type { AgentDriver } from './drivers/index.js'
 import { SessionEventLog } from './events.js'
 import { RunStore, type RunListQuery } from './run-store.js'
+import {
+    AdminRunManager,
+    type AdminRetryReservation,
+    type AdminRetryReservationFactory,
+    type AdminRunOperationResult,
+    type AdminRunControls
+} from './session/admin-runs.js'
+import { SessionAdmission } from './session/admission.js'
+import { SessionReadiness } from './session/readiness.js'
 import type {
     AcpSessionSink,
     AgentSessionRuntime,
@@ -37,11 +46,41 @@ import {
 const MAX_SESSION_ARTIFACTS = 64
 const MAX_ARTIFACT_BASE64_CHARS = 16 * 1024 * 1024
 const MAX_SESSION_BASE64_CHARS = 32 * 1024 * 1024
-const READINESS_CACHE_MS = 20_000
 const MAX_INPUT_ATTACHMENTS = 16
 const MAX_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
 const MAX_SESSION_INPUT_BYTES = 32 * 1024 * 1024
 const MAX_PUBLISHED_FILE_BYTES = 12 * 1024 * 1024
+
+/** Optional durable sink for full artifact snapshots. */
+export interface SessionArtifactStore {
+    recordArtifacts(
+        runId: string,
+        artifacts: AgentdArtifact[]
+    ): unknown | Promise<unknown>
+}
+
+export type SessionLifecycleEvent =
+    | {
+          type: 'session_created'
+          sessionId: string
+          ownerKeyId: string
+          agentId: string
+      }
+    | {
+          type: 'run_updated'
+          sessionId: string
+          runId: string
+          ownerKeyId: string
+          state: AgentdSessionState
+      }
+    | {
+          type: 'session_closed'
+          sessionId: string
+          ownerKeyId: string
+          agentId: string
+      }
+
+export type SessionLifecycleListener = (event: SessionLifecycleEvent) => void
 
 export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     readonly id = randomUUID()
@@ -58,6 +97,11 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     private artifacts: AgentdArtifact[] = []
     private inputAttachments = new Map<string, AgentdInputAttachment>()
     private runtime?: AgentSessionRuntime
+    private readonly artifactStore?: SessionArtifactStore
+    private readonly onRunUpdate?: (
+        runId: string,
+        state: AgentdSessionState
+    ) => void
 
     constructor(
         readonly agentId: string,
@@ -68,14 +112,22 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         private readonly maxOutputChars: number,
         private readonly agentName: string,
         private readonly runStore?: RunStore,
-        readonly instanceId: string = randomUUID()
+        readonly instanceId: string = randomUUID(),
+        artifactStore?: SessionArtifactStore,
+        onRunUpdate?: (runId: string, state: AgentdSessionState) => void
     ) {
+        this.artifactStore = artifactStore || runStore
+        this.onRunUpdate = onRunUpdate
         this.events = new SessionEventLog(this.id, maxEvents)
         this.events.append('session_state', { state: this.state, protocol })
     }
 
     attach(runtime: AgentSessionRuntime) {
         this.runtime = runtime
+    }
+
+    runtimeAvailable() {
+        return Boolean(this.runtime && this.runtime.isAvailable?.() !== false)
     }
 
     setProtocolSessionId(id: string) {
@@ -336,7 +388,11 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         return attachmentView(attachment)
     }
 
-    async message(message: string, attachmentIds: string[] = []) {
+    async message(
+        message: string,
+        attachmentIds: string[] = [],
+        retryOfRunId?: string
+    ) {
         if (!this.runtime || this.runtime.isAvailable?.() === false) throw new SessionRequestError(409, 'Agent runtime is unavailable')
         const attachments = this.inputAttachmentsFor(attachmentIds)
         if (this.pendingRequest) {
@@ -366,7 +422,8 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             protocolSessionId: this.protocolSessionId,
             ownerKeyId: this.ownerKeyId,
             task: message,
-            inputAttachmentCount: attachments.length
+            inputAttachmentCount: attachments.length,
+            ...(retryOfRunId ? { retryOfRunId } : {})
         }).id
         this.setState('running')
         void this.runtime.prompt(message, attachments).catch((error) => {
@@ -462,6 +519,42 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             updatedAt: this.updatedAt,
             ...patch
         })
+        if (patch.artifacts && this.artifactStore?.recordArtifacts) {
+            const runId = this.currentRunId
+            const artifacts = structuredClone(this.artifacts)
+            void Promise.resolve()
+                .then(() =>
+                    this.artifactStore!.recordArtifacts(
+                        runId!,
+                        artifacts
+                    )
+                )
+                .catch((error) => {
+                    console.error(
+                        JSON.stringify({
+                            level: 'error',
+                            event: 'artifact_snapshot_record_failed',
+                            runId,
+                            message: errorMessage(error)
+                        })
+                    )
+                })
+        }
+        try {
+            this.onRunUpdate?.(this.currentRunId, this.state)
+        } catch (error) {
+            // Lifecycle observers (for example quota accounting) must never
+            // turn a successful agent event into a failed protocol turn.
+            console.error(
+                JSON.stringify({
+                    level: 'error',
+                    event: 'session_lifecycle_observer_failed',
+                    sessionId: this.id,
+                    runId: this.currentRunId,
+                    message: errorMessage(error)
+                })
+            )
+        }
     }
 
     private inputAttachmentsFor(ids: string[]) {
@@ -479,14 +572,90 @@ export class SessionManager {
     private sessions = new Map<string, ManagedSession>()
     private sessionLocks = new Map<string, Promise<unknown>>()
     private cleanupTimer?: NodeJS.Timeout
-    private readinessCache?: { expiresAt: number; agents: AgentdAgentView[] }
+    private readonly readiness: SessionReadiness
+    private readonly admission: SessionAdmission
+    private readonly adminRuns: AdminRunManager
+    private readonly artifactStore?: SessionArtifactStore
+    private readonly lifecycleListeners = new Set<SessionLifecycleListener>()
 
     constructor(
         private config: AgentdConfig,
         private workspacePolicy: WorkspacePolicy,
         private drivers: Map<string, AgentDriver>,
-        private readonly runStore?: RunStore
-    ) {}
+        private readonly runStore?: RunStore,
+        artifactStore?: SessionArtifactStore
+    ) {
+        this.artifactStore = artifactStore || runStore
+        this.readiness = new SessionReadiness(config, drivers, {
+            requestError: (status, message) => new SessionRequestError(status, message)
+        })
+        this.admission = new SessionAdmission({
+            maxSessions: () => this.config.maxSessions || 64,
+            sessionCount: () => this.sessions.size,
+            sessions: () => this.sessions.values(),
+            isCurrent: (session) => this.sessions.get(session.id) === session,
+            withSessionLock: (id, operation) => this.withSessionLock(id, operation),
+            removeSession: (id) => {
+                const session = this.sessions.get(id)
+                if (!session || !this.sessions.delete(id)) return
+                this.notifyLifecycle({
+                    type: 'session_closed',
+                    sessionId: session.id,
+                    ownerKeyId: session.ownerKeyId,
+                    agentId: session.agentId
+                })
+            },
+            requestError: (status, message) => new SessionRequestError(status, message)
+        })
+        this.adminRuns = new AdminRunManager({
+            getRun: (runId) => this.getRun(runId),
+            getSession: (sessionId) => this.sessions.get(sessionId),
+            getAgent: (agentId) => this.config.agents[agentId],
+            getOwnerKeyId: (runId) => this.getRunOwnerKeyId(runId),
+            withSessionLock: (sessionId, operation) => this.withSessionLock(sessionId, operation),
+            startRetry: async (run, ownerKeyId, reservation) => {
+                const created = await this.create(run.agentId, run.workspace, ownerKeyId)
+                try {
+                    reservation?.bind(created.id)
+                    await this.message(created.id, run.task, [], run.id)
+                    const snapshot = this.get(created.id)
+                    if (!snapshot.runId) {
+                        throw new SessionRequestError(
+                            502,
+                            'Retried task did not create a run record'
+                        )
+                    }
+                    return { runId: snapshot.runId, sessionId: created.id }
+                } catch (error) {
+                    try {
+                        await this.close(created.id)
+                    } catch (cleanupError) {
+                        console.error(
+                            JSON.stringify({
+                                level: 'error',
+                                event: 'retry_session_cleanup_failed',
+                                sessionId: created.id,
+                                message: errorMessage(cleanupError)
+                            })
+                        )
+                    }
+                    throw error
+                }
+            },
+            markRetryOf: (newRunId, oldRunId) => {
+                const store = this.runStore as
+                    | (RunStore & {
+                          setRetryOfRunId?: (
+                              newRunId: string,
+                              oldRunId: string
+                          ) => unknown
+                      })
+                    | undefined
+                return store?.setRetryOfRunId?.(newRunId, oldRunId)
+            },
+            requestError: (status, message) => new SessionRequestError(status, message)
+        })
+    }
 
     reconfigure(
         config: AgentdConfig,
@@ -496,7 +665,7 @@ export class SessionManager {
         this.config = config
         this.workspacePolicy = workspacePolicy
         this.drivers = drivers
-        this.readinessCache = undefined
+        this.readiness.reconfigure(config, drivers)
         if (this.cleanupTimer) this.restartCleanup()
     }
 
@@ -506,82 +675,23 @@ export class SessionManager {
     }
 
     async listAgents(agentIds?: Set<string>, force = false): Promise<AgentdAgentView[]> {
-        const now = Date.now()
-        if (!force && this.readinessCache && this.readinessCache.expiresAt > now) {
-            return filterAgents(this.readinessCache.agents, agentIds)
-        }
-        const agents = await Promise.all(
-            Object.entries(this.config.agents).map(async ([id, config]) => {
-                if (config.protocol === 'a2a') return probeA2AAgent(id, config)
-                if (config.enabled === false) {
-                    return {
-                        id,
-                        name: config.name || id,
-                        description: config.description,
-                        protocol: 'acp' as const,
-                        driver: config.driver,
-                        ready: false,
-                        enabled: false,
-                        workspace: this.defaultWorkspace(id),
-                        error: 'Agent is disabled',
-                        checkedAt: Date.now()
-                    }
-                }
-                const driver = this.drivers.get(id)
-                if (!driver) {
-                    return {
-                        id,
-                        name: config.name || id,
-                        description: config.description,
-                        protocol: 'acp' as const,
-                        driver: config.driver,
-                        ready: false,
-                        enabled: true,
-                        workspace: this.defaultWorkspace(id),
-                        error: 'ACP driver is unavailable',
-                        checkedAt: Date.now()
-                    }
-                }
-                const startedAt = Date.now()
-                try {
-                    const probe = await driver.probe()
-                    return {
-                        ...probe,
-                        protocol: 'acp' as const,
-                        driver: config.driver,
-                        enabled: true,
-                        workspace: this.defaultWorkspace(id),
-                        checkedAt: Date.now(),
-                        responseMs: Date.now() - startedAt
-                    }
-                } catch (error) {
-                    return {
-                        id,
-                        name: config.name || id,
-                        description: config.description,
-                        protocol: 'acp' as const,
-                        driver: config.driver,
-                        ready: false,
-                        enabled: true,
-                        workspace: this.defaultWorkspace(id),
-                        error: errorMessage(error),
-                        checkedAt: Date.now(),
-                        responseMs: Date.now() - startedAt
-                    }
-                }
-            })
-        )
-        agents.sort((left, right) => left.name.localeCompare(right.name))
-        this.readinessCache = {
-            expiresAt: Date.now() + READINESS_CACHE_MS,
-            agents: structuredClone(agents)
-        }
-        return filterAgents(agents, agentIds)
+        return this.readiness.listAgents(agentIds, force)
     }
 
     async create(agentId: string, workspaceInput: string | undefined, ownerKeyId: string) {
-        await this.ensureCapacity()
-        const config = this.config.agents[agentId]
+        if (!Object.hasOwn(this.config.agents, agentId) || this.config.agents[agentId].enabled === false) {
+            throw new SessionRequestError(404, `Configured agent not found: ${agentId}`)
+        }
+        let release: () => void = () => undefined
+        await this.withSessionLock('admission', async () => {
+            release = await this.admission.reserve()
+        })
+        try { return await this.createReserved(agentId, workspaceInput, ownerKeyId, release) }
+        finally { release() }
+    }
+
+    private async createReserved(agentId: string, workspaceInput: string | undefined, ownerKeyId: string, release: () => void) {
+        const config = Object.hasOwn(this.config.agents, agentId) ? this.config.agents[agentId] : undefined
         if (!config || config.enabled === false) {
             throw new SessionRequestError(404, `Configured agent not found: ${agentId}`)
         }
@@ -600,6 +710,9 @@ export class SessionManager {
             }
             workspace = await this.workspacePolicy.resolve(requestedWorkspace)
         }
+        if (this.admission.isClosing()) {
+            throw new SessionRequestError(503, 'Gateway is shutting down')
+        }
         const session = new ManagedSession(
             agentId,
             config.protocol === 'a2a' ? 'a2a' : 'acp',
@@ -609,7 +722,16 @@ export class SessionManager {
             this.config.maxOutputChars,
             config.name || agentId,
             this.runStore,
-            this.instanceId
+            this.instanceId,
+            this.artifactStore,
+            (runId, state) =>
+                this.notifyLifecycle({
+                    type: 'run_updated',
+                    sessionId: session.id,
+                    runId,
+                    ownerKeyId: session.ownerKeyId,
+                    state
+                })
         )
         const runtime: AgentSessionRuntime =
             config.protocol === 'a2a'
@@ -626,6 +748,13 @@ export class SessionManager {
                       this.workspacePolicy.listRoots()
                   )
         this.sessions.set(session.id, session)
+        this.notifyLifecycle({
+            type: 'session_created',
+            sessionId: session.id,
+            ownerKeyId: session.ownerKeyId,
+            agentId: session.agentId
+        })
+        release()
         session.attach(runtime)
         try {
             await runtime.start(workspace)
@@ -634,7 +763,16 @@ export class SessionManager {
             session.setState('failed', errorMessage(error))
             try { await session.dispose() } catch (cleanupError) {
                 console.error(JSON.stringify({ level: 'error', event: 'session_start_cleanup_failed', sessionId: session.id, message: errorMessage(cleanupError) }))
-            } finally { this.sessions.delete(session.id) }
+            } finally {
+                if (this.sessions.delete(session.id)) {
+                    this.notifyLifecycle({
+                        type: 'session_closed',
+                        sessionId: session.id,
+                        ownerKeyId: session.ownerKeyId,
+                        agentId: session.agentId
+                    })
+                }
+            }
             throw new SessionRequestError(502, `Agent failed to start: ${errorMessage(error)}`)
         }
     }
@@ -651,6 +789,11 @@ export class SessionManager {
         return this.sessions.size
     }
 
+    subscribeLifecycle(listener: SessionLifecycleListener) {
+        this.lifecycleListeners.add(listener)
+        return () => this.lifecycleListeners.delete(listener)
+    }
+
     listRuns(query: RunListQuery = {}) {
         return this.runStore?.list(query) || { runs: [], total: 0, stats: { active: 0, completed: 0, failed: 0 } }
     }
@@ -661,12 +804,84 @@ export class SessionManager {
         return run
     }
 
-    async message(id: string, message: string, attachmentIds: string[] = []) {
+    getRunOwnerKeyId(id: string) {
+        const store = this.runStore as
+            | (RunStore & {
+                  getOwnerKeyId?: (runId: string) => string | undefined
+              })
+            | undefined
+        return store?.getOwnerKeyId?.(id)
+    }
+
+    ownsRun(id: string, keyId: string) {
+        return this.getRunOwnerKeyId(id) === keyId
+    }
+
+    getRunArtifacts(id: string) {
+        return this.getRun(id).artifacts
+    }
+
+    getStorageMetrics(): ReturnType<RunStore['metrics']> | undefined {
+        return this.runStore?.metrics()
+    }
+
+    async readRunArtifact(runId: string, artifactId: string) {
+        // Read through RunStore so the artifact directory remains the only
+        // place that knows how payload filenames are derived and validated.
+        this.getRun(runId)
+        const store = this.runStore as
+            | (RunStore & {
+                  readArtifact?: (
+                      runId: string,
+                      artifactId: string
+                  ) => Promise<unknown> | unknown
+              })
+            | undefined
+        return store?.readArtifact?.(runId, artifactId)
+    }
+
+    getRunArtifact(runId: string, artifactId: string) {
+        return this.readRunArtifact(runId, artifactId)
+    }
+
+    getRunControls(id: string): AdminRunControls {
+        return this.adminRuns.getRunControls(id)
+    }
+
+    async cancelRun(id: string): Promise<AdminRunOperationResult> {
+        return this.adminRuns.cancelRun(id)
+    }
+
+    async respondRun(
+        id: string,
+        response: AgentdPendingResponse,
+        attachmentIds: string[] = []
+    ): Promise<AdminRunOperationResult> {
+        return this.adminRuns.respondRun(id, response, attachmentIds)
+    }
+
+    async retryRun(
+        id: string,
+        reserveRetry?: AdminRetryReservationFactory
+    ): Promise<AdminRunOperationResult> {
+        return this.adminRuns.retryRun(id, reserveRetry)
+    }
+
+    retryOfRunId(id: string) {
+        return this.adminRuns.retryOfRunId(id)
+    }
+
+    async message(
+        id: string,
+        message: string,
+        attachmentIds: string[] = [],
+        retryOfRunId?: string
+    ) {
         const text = String(message || '')
         if (!text.trim()) throw new SessionRequestError(400, 'message is required')
         return this.withSessionLock(id, async () => {
             const session = this.require(id)
-            await session.message(text, attachmentIds)
+            await session.message(text, attachmentIds, retryOfRunId)
             return session.snapshot()
         })
     }
@@ -715,7 +930,14 @@ export class SessionManager {
             if (isActive(session.state)) await session.cancel()
             const snapshot = session.snapshot()
             await session.dispose()
-            this.sessions.delete(id)
+            if (this.sessions.delete(id)) {
+                this.notifyLifecycle({
+                    type: 'session_closed',
+                    sessionId: session.id,
+                    ownerKeyId: session.ownerKeyId,
+                    agentId: session.agentId
+                })
+            }
             return snapshot
         })
     }
@@ -724,20 +946,35 @@ export class SessionManager {
         return this.require(id).events.after(after)
     }
 
+    eventReplay(id: string, after?: string) {
+        return this.require(id).events.replay(after)
+    }
+
     subscribe(id: string, listener: (event: AgentdEvent) => void) {
         return this.require(id).events.subscribe(listener)
     }
 
     async shutdown() {
+        this.admission.markClosing()
         if (this.cleanupTimer) clearInterval(this.cleanupTimer)
         this.cleanupTimer = undefined
-        await Promise.allSettled(
+        const results = await Promise.allSettled(
             Array.from(this.sessions.values()).map(async (session) => {
                 session.interruptForShutdown()
                 await session.dispose()
             })
         )
+        for (const session of this.sessions.values()) {
+            this.notifyLifecycle({
+                type: 'session_closed',
+                sessionId: session.id,
+                ownerKeyId: session.ownerKeyId,
+                agentId: session.agentId
+            })
+        }
         this.sessions.clear()
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failures.length) throw new AggregateError(failures.map((result) => result.reason), 'Failed to dispose one or more Agent sessions')
     }
 
     private async withSessionLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
@@ -767,22 +1004,6 @@ export class SessionManager {
         return session
     }
 
-    private async ensureCapacity() {
-        const limit = this.config.maxSessions || 64
-        if (this.sessions.size < limit) return
-        const terminal = Array.from(this.sessions.values())
-            .filter((session) => isTerminal(session.state))
-            .sort((left, right) => left.updatedAt - right.updatedAt)
-        while (this.sessions.size >= limit && terminal.length) {
-            const session = terminal.shift()!
-            await session.dispose()
-            this.sessions.delete(session.id)
-        }
-        if (this.sessions.size >= limit) {
-            throw new SessionRequestError(429, 'Session capacity has been reached')
-        }
-    }
-
     private async cleanup() {
         const cutoff = Date.now() - this.config.sessionTtlMs
         for (const [id, session] of this.sessions) {
@@ -792,7 +1013,16 @@ export class SessionManager {
                 if (!isTerminal(session.state)) session.setState('failed', 'Session expired after exceeding its lifetime')
                 try { await session.dispose() } catch (error) {
                     console.error(JSON.stringify({ level: 'error', event: 'session_cleanup_failed', sessionId: id, message: errorMessage(error) }))
-                } finally { this.sessions.delete(id) }
+                } finally {
+                    if (this.sessions.delete(id)) {
+                        this.notifyLifecycle({
+                            type: 'session_closed',
+                            sessionId: session.id,
+                            ownerKeyId: session.ownerKeyId,
+                            agentId: session.agentId
+                        })
+                    }
+                }
             })
         }
     }
@@ -812,6 +1042,23 @@ export class SessionManager {
         const config = this.config.agents[agentId]
         if (config?.protocol === 'a2a') return ''
         return config?.workspace || this.config.workspaceRoots[0] || ''
+    }
+
+    private notifyLifecycle(event: SessionLifecycleEvent) {
+        for (const listener of this.lifecycleListeners) {
+            try {
+                listener(structuredClone(event))
+            } catch (error) {
+                console.error(
+                    JSON.stringify({
+                        level: 'error',
+                        event: 'session_lifecycle_listener_failed',
+                        type: event.type,
+                        message: errorMessage(error)
+                    })
+                )
+            }
+        }
     }
 }
 
@@ -967,12 +1214,6 @@ export class RunNotFoundError extends Error {
     constructor(readonly runId: string) {
         super(`Agent Nexus run not found: ${runId}`)
     }
-}
-
-function filterAgents(agents: AgentdAgentView[], ids?: Set<string>) {
-    return agents
-        .filter((agent) => !ids || ids.has(agent.id))
-        .map((agent) => structuredClone(agent))
 }
 
 function isTerminal(state: AgentdSessionState) {

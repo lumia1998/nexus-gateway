@@ -1,5 +1,8 @@
+// @ts-check
+import { readLocationState } from './location-state.js'
+const initialLocation = /** @type {Pick<import('./contracts.js').WebUiState, 'page'|'runAgent'|'runStatus'|'runPageSize'|'runOffset'|'selectedRunId'>} */ (readLocationState())
+/** @type {import('./contracts.js').WebUiState} */
 export const state = {
-  page: 'overview',
   config: { workspaceRoots: [], driverKinds: [], agents: [] },
   readiness: [],
   apiKeys: [],
@@ -11,9 +14,18 @@ export const state = {
   protocol: 'all',
   status: 'all',
   runSearch: '',
-  runAgent: 'all',
-  runStatus: 'all',
-  authenticated: false
+  runHasNew: false,
+  authEpoch: 0,
+  authenticated: false,
+  metrics: null,
+  resources: {
+    config: { status: 'idle', lastSuccessAt: 0 },
+    apiKeys: { status: 'idle', lastSuccessAt: 0 },
+    overview: { status: 'idle', lastSuccessAt: 0 },
+    runs: { status: 'idle', lastSuccessAt: 0 },
+    metrics: { status: 'idle', lastSuccessAt: 0 }
+  },
+  ...initialLocation
 }
 
 export const pageMeta = {

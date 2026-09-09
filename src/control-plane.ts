@@ -1,67 +1,47 @@
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { ControlPlaneError, validateRuntimeSettings, validateUpdate, validateAgentId, validateOpaqueId, validatePassword, validateKeyName, validateApiKeySecret, validateA2ASecret, validateAgentUrl, defaultAgentCardUrl, clampTimeout, preservedAcpAdvanced, setOptionalString, validHeaderName, safeSecretEqual, cleanString, recordValue, isRecord, errorMessage, type AgentdAgentUpdate, type AgentdApiKeyUpdate, type AgentdRuntimeSettingsUpdate } from './control-plane-validation.js'
+export { ControlPlaneError, type AgentdAgentUpdate, type AgentdApiKeyUpdate, type AgentdRuntimeSettingsUpdate } from './control-plane-validation.js'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { chmod, open, readFile, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
-import { hashAdminPassword, validateAdminPassword, verifyAdminPassword } from './auth.js'
+import { hashAdminPassword, verifyAdminPassword } from './auth.js'
 import { loadAgentdConfig } from './config.js'
 import { createDriverRegistry } from './drivers/index.js'
 import type { SessionManager } from './session.js'
-import {
-    agentdDriverKinds,
-    type A2AAuthType,
-    type A2ATransportPreference,
-    type AgentdAgentConfig,
-    type AgentdAgentConfigView,
-    type AgentdApiKeyConfig,
-    type AgentdApiKeyPrincipal,
-    type AgentdApiKeyScope,
-    type AgentdApiKeyView,
-    type AgentdConfig,
-    type AgentdControlPlaneView,
-    type AgentdDriverKind,
-    type AgentdProtocol,
-    type PermissionPolicy
-} from './types.js'
+import { agentdDriverKinds, type AgentdAgentConfig, type AgentdAgentConfigView, type AgentdApiKeyConfig, type AgentdApiKeyPrincipal, type AgentdApiKeyScope, type AgentdApiKeyView, type AgentdConfig, type AgentdControlPlaneView } from './types.js'
 import { WorkspacePolicy } from './workspace.js'
 
-export interface AgentdAgentUpdate {
-    protocol?: AgentdProtocol
-    driver?: AgentdDriverKind
-    name?: string
-    description?: string
-    enabled?: boolean
-    workspace?: string
-    permissionPolicy?: PermissionPolicy
-    permissionTimeoutMs?: number
-    agentCardUrl?: string
-    agentUrl?: string
-    preferredTransport?: A2ATransportPreference
-    authType?: A2AAuthType
-    authValue?: string
-    authHeaderName?: string
-    timeoutMs?: number
-}
-
-export interface AgentdApiKeyUpdate {
-    name?: string
-    enabled?: boolean
-    scope?: AgentdApiKeyScope
-}
-
-export interface AgentdRuntimeSettingsUpdate {
-    sessionTtlMs: number
-    promptTimeoutMs: number
-    cleanupIntervalMs: number
-}
-
 export class AgentdControlPlane {
+    /** Process-local proof, delivered only through the local CLI / embedding API. */
+    setupToken?: string
     private queue = Promise.resolve()
     private usageTimer?: NodeJS.Timeout
+    private readonly keyWatchers = new Set<() => void>()
+
+    /** Observe authorization without updating last-used time or retaining a stale scope. */
+    watchApiKey(keyId: string, secret: string, agentId: string, revoked: () => void) {
+        const check = () => {
+            const key = this.config.apiKeys?.find((item) => item.id === keyId && item.enabled && safeSecretEqual(item.secret, secret))
+            if (!key || (!key.scope.allAgents && !key.scope.agentIds.includes(agentId))) {
+                this.keyWatchers.delete(check)
+                revoked()
+            }
+        }
+        this.keyWatchers.add(check)
+        check()
+        return () => { this.keyWatchers.delete(check) }
+    }
 
     constructor(
         private readonly configPath: string,
         private config: AgentdConfig,
         private readonly sessions: SessionManager
-    ) {}
+    ) {
+        if (!config.adminPasswordHash) this.setupToken = randomBytes(32).toString('base64url')
+    }
+
+    verifySetupToken(token: string) {
+        return Boolean(this.setupToken && safeSecretEqual(token, this.setupToken))
+    }
 
     snapshot(): AgentdControlPlaneView {
         return {
@@ -103,6 +83,7 @@ export class AgentdControlPlane {
             raw.adminPasswordHash = await hashAdminPassword(password)
             if (!Array.isArray(raw.apiKeys)) raw.apiKeys = []
             await this.persist(raw)
+            this.setupToken = undefined
             return { initialized: true as const, adminSetupRequired: false as const }
         })
     }
@@ -311,7 +292,7 @@ export class AgentdControlPlane {
         const agents = recordValue(raw.agents)
         const previous = recordValue(agents[id])
         let next: Record<string, unknown>
-        const protocol = update.protocol || 'acp'
+        const protocol = update.protocol || previous.protocol || 'acp'
         if (protocol === 'a2a') {
             const requestedAgentCardUrl = cleanString(update.agentCardUrl)
             const requestedAgentUrl = cleanString(update.agentUrl)
@@ -360,7 +341,15 @@ export class AgentdControlPlane {
                     ...(authType !== 'none' ? { value: authValue } : {}),
                     ...(authType === 'header' ? { headerName: authHeaderName } : {})
                 },
-                timeoutMs: clampTimeout(update.timeoutMs, 60_000, 1000, 30 * 60_000)
+                timeoutMs: clampTimeout(update.timeoutMs ?? previous.timeoutMs as number | undefined, 60_000, 1000, 30 * 60_000)
+            }
+            for (const field of ['taskTimeoutMs', 'streamIdleTimeoutMs'] as const) {
+                const value = update[field] === undefined ? previous[field] : update[field]
+                if (value != null) {
+                    next[field] = clampTimeout(value as number, 60_000,
+                        field === 'taskTimeoutMs' ? 10_000 : 1000,
+                        field === 'taskTimeoutMs' ? 24 * 60 * 60_000 : 30 * 60_000)
+                }
             }
         } else {
             const driver = update.driver || cleanString(previous.driver)
@@ -381,7 +370,7 @@ export class AgentdControlPlane {
                 permissionPolicy:
                     update.permissionPolicy || cleanString(previous.permissionPolicy) || 'ask',
                 permissionTimeoutMs: clampTimeout(
-                    update.permissionTimeoutMs,
+                    update.permissionTimeoutMs ?? previous.permissionTimeoutMs as number | undefined,
                     15 * 60_000,
                     1000,
                     24 * 60 * 60 * 1000
@@ -405,7 +394,7 @@ export class AgentdControlPlane {
         }
         const agentIds = Array.from(new Set(input.agentIds.map(validateAgentId)))
         for (const id of agentIds) {
-            if (!this.config.agents[id]) {
+            if (!Object.hasOwn(this.config.agents, id)) {
                 throw new ControlPlaneError(400, `Configured agent not found: ${id}`)
             }
         }
@@ -519,6 +508,7 @@ export class AgentdControlPlane {
             await chmod(target, 0o600).catch(() => undefined)
             this.config = nextConfig
             this.sessions.reconfigure(nextConfig, workspacePolicy, drivers)
+            for (const check of this.keyWatchers) check()
         } finally {
             if (!moved) await rm(temporary, { force: true }).catch(() => undefined)
         }
@@ -540,7 +530,9 @@ export class AgentdControlPlane {
                     headerName: config.auth?.headerName,
                     configured: Boolean(config.auth?.value)
                 },
-                timeoutMs: config.timeoutMs || 60_000
+                timeoutMs: config.timeoutMs || 60_000,
+                taskTimeoutMs: config.taskTimeoutMs,
+                streamIdleTimeoutMs: config.streamIdleTimeoutMs
             }
         }
         return {
@@ -564,182 +556,4 @@ export class AgentdControlPlane {
         )
         return result
     }
-}
-
-export class ControlPlaneError extends Error {
-    constructor(
-        readonly status: number,
-        message: string
-    ) {
-        super(message)
-    }
-}
-
-function validateRuntimeSettings(update: AgentdRuntimeSettingsUpdate) {
-    validateIntegerRange(update.sessionTtlMs, 60_000, 30 * 24 * 60 * 60 * 1000, 'sessionTtlMs')
-    validateIntegerRange(update.promptTimeoutMs, 10_000, 24 * 60 * 60 * 1000, 'promptTimeoutMs')
-    validateIntegerRange(update.cleanupIntervalMs, 5_000, 60 * 60 * 1000, 'cleanupIntervalMs')
-}
-
-function validateIntegerRange(value: number, min: number, max: number, name: string) {
-    if (!Number.isInteger(value) || value < min || value > max) {
-        throw new ControlPlaneError(400, `${name} must be between ${min} and ${max}`)
-    }
-}
-
-function validateUpdate(update: AgentdAgentUpdate) {
-    if (update.protocol !== undefined && update.protocol !== 'acp' && update.protocol !== 'a2a') {
-        throw new ControlPlaneError(400, 'protocol must be acp or a2a')
-    }
-    if (
-        update.permissionPolicy !== undefined &&
-        update.permissionPolicy !== 'ask' &&
-        update.permissionPolicy !== 'allow' &&
-        update.permissionPolicy !== 'deny'
-    ) {
-        throw new ControlPlaneError(400, 'permissionPolicy must be ask, allow, or deny')
-    }
-    if (
-        update.preferredTransport !== undefined &&
-        !['auto', 'jsonrpc', 'http-json'].includes(update.preferredTransport)
-    ) {
-        throw new ControlPlaneError(
-            400,
-            'preferredTransport must be auto, jsonrpc, or http-json'
-        )
-    }
-}
-
-function validateAgentId(value: string) {
-    const id = decodeURIComponent(value).trim().toLowerCase()
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) {
-        throw new ControlPlaneError(400, 'Invalid Agent ID')
-    }
-    return id
-}
-
-function validateOpaqueId(value: string, label: string) {
-    const id = decodeURIComponent(value).trim()
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(id)) {
-        throw new ControlPlaneError(400, `Invalid ${label} ID`)
-    }
-    return id
-}
-
-function validatePassword(value: string, confirmation: string) {
-    if (value !== confirmation) {
-        throw new ControlPlaneError(400, 'Console Password confirmation does not match')
-    }
-    try {
-        return validateAdminPassword(value)
-    } catch (error) {
-        throw new ControlPlaneError(400, errorMessage(error))
-    }
-}
-
-function validateKeyName(value: string) {
-    const name = cleanString(value)
-    if (!name) throw new ControlPlaneError(400, 'API Key name is required')
-    if (name.length > 80) throw new ControlPlaneError(400, 'API Key name is too long')
-    return name
-}
-
-function validateApiKeySecret(value: string) {
-    const secret = cleanString(value)
-    if (secret.length < 16) {
-        throw new ControlPlaneError(400, 'Custom API Key must contain at least 16 characters')
-    }
-    if (Buffer.byteLength(secret, 'utf8') > 512) {
-        throw new ControlPlaneError(400, 'Custom API Key must not exceed 512 bytes')
-    }
-    if (/^env:/i.test(secret) || /[\u0000-\u001f\u007f]/.test(secret)) {
-        throw new ControlPlaneError(400, 'Custom API Key contains an unsupported value')
-    }
-    return secret
-}
-
-function validateA2ASecret(value: string) {
-    const secret = cleanString(value)
-    if (!secret) return ''
-    if (
-        /^env:/i.test(secret) ||
-        Buffer.byteLength(secret, 'utf8') > 4096 ||
-        /[\u0000\r\n]/.test(secret)
-    ) {
-        throw new ControlPlaneError(400, 'A2A authentication value is invalid')
-    }
-    return secret
-}
-
-function validateAgentUrl(value: string) {
-    let url: URL
-    try {
-        url = new URL(value)
-    } catch {
-        throw new ControlPlaneError(400, 'A2A Agent Card URL is invalid')
-    }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
-        throw new ControlPlaneError(
-            400,
-            'A2A Agent Card URL must use http(s) without credentials or a fragment'
-        )
-    }
-    return url.toString().replace(/\/$/, '')
-}
-
-function defaultAgentCardUrl(agentUrl: string | undefined) {
-    if (!agentUrl) return undefined
-    return new URL('/.well-known/agent-card.json', agentUrl).toString()
-}
-
-function clampTimeout(value: number | undefined, fallback: number, min: number, max: number) {
-    if (value === undefined) return fallback
-    if (!Number.isInteger(value) || value < min || value > max) {
-        throw new ControlPlaneError(400, `timeout must be between ${min} and ${max}`)
-    }
-    return value
-}
-
-function preservedAcpAdvanced(previous: Record<string, unknown>) {
-    const result: Record<string, unknown> = {}
-    for (const key of ['command', 'args', 'inheritEnv', 'env']) {
-        if (previous[key] !== undefined) result[key] = structuredClone(previous[key])
-    }
-    return result
-}
-
-function setOptionalString(
-    target: Record<string, unknown>,
-    key: string,
-    value: string | undefined
-) {
-    const text = cleanString(value)
-    if (text) target[key] = text
-    else delete target[key]
-}
-
-function validHeaderName(value: string) {
-    return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value)
-}
-
-function safeSecretEqual(left: string, right: string) {
-    const leftBuffer = Buffer.from(left)
-    const rightBuffer = Buffer.from(right)
-    return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
-}
-
-function cleanString(value: unknown) {
-    return typeof value === 'string' ? value.trim() : ''
-}
-
-function recordValue(value: unknown): Record<string, any> {
-    return isRecord(value) ? { ...value } : {}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
-
-function errorMessage(error: unknown) {
-    return error instanceof Error ? error.message : String(error)
 }

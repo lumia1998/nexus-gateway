@@ -208,6 +208,35 @@ test('control plane manages ACP/A2A agents and recoverable scoped API Keys witho
     }
 })
 
+test('Agent edits preserve timeout overrides and local stdio settings, with explicit reset to inherited deadlines', async () => {
+    const fixture = await createFixture({ initialized: false, agents: {
+        custom: { driver: 'stdio', command: process.execPath, args: ['adapter.mjs'], probeArgs: ['--version'], inheritEnv: ['PATH'], env: { ADAPTER_MODE: 'test' }, permissionTimeoutMs: 32_100 },
+        remote: { protocol: 'a2a', agentCardUrl: 'http://127.0.0.1:8080/card', timeoutMs: 32_123, taskTimeoutMs: 121_234, streamIdleTimeoutMs: 54_321 }
+    } })
+    try {
+        await fixture.control.putAgent('custom', { name: 'Renamed' })
+        await fixture.control.putAgent('remote', { name: 'Renamed remote' })
+        let raw = JSON.parse(await readFile(fixture.configPath, 'utf8'))
+        assert.equal(raw.agents.custom.command, process.execPath)
+        assert.deepEqual(raw.agents.custom.args, ['adapter.mjs'])
+        assert.deepEqual(raw.agents.custom.probeArgs, ['--version'])
+        assert.deepEqual(raw.agents.custom.inheritEnv, ['PATH'])
+        assert.deepEqual(raw.agents.custom.env, { ADAPTER_MODE: 'test' })
+        assert.equal(raw.agents.custom.permissionTimeoutMs, 32_100)
+        assert.equal(raw.agents.remote.timeoutMs, 32_123)
+        assert.equal(raw.agents.remote.taskTimeoutMs, 121_234)
+        assert.equal(raw.agents.remote.streamIdleTimeoutMs, 54_321)
+        const before = await readFile(fixture.configPath, 'utf8')
+        await assert.rejects(fixture.control.putAgent('remote', { taskTimeoutMs: 9999 }), /timeout/)
+        assert.equal(await readFile(fixture.configPath, 'utf8'), before)
+        await fixture.control.putAgent('remote', { taskTimeoutMs: null, streamIdleTimeoutMs: null })
+        raw = JSON.parse(await readFile(fixture.configPath, 'utf8'))
+        assert.equal(raw.agents.remote.taskTimeoutMs, undefined)
+        assert.equal(raw.agents.remote.streamIdleTimeoutMs, undefined)
+        assert.equal(fixture.control.snapshot().agents.find((a) => a.id === 'remote')?.taskTimeoutMs, undefined)
+    } finally { await fixture.close() }
+})
+
 async function createFixture(input: Record<string, unknown>) {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-control-'))
     const configPath = path.join(directory, 'nexus-agentd.json')

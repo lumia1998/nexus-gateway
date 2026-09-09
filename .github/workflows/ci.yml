@@ -10,17 +10,34 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: ['20']
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium (Ubuntu)
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: Install Chromium (Windows)
+        if: runner.os == 'Windows'
+        run: npx playwright install chromium
       - run: npm run test:webui
+      - name: Package deployment artifact
+        run: node scripts/package-deploy.mjs --artifact nexus-gateway.tar.gz
+      - name: Install and start packaged artifact
+        run: node scripts/package-smoke.mjs nexus-gateway.tar.gz
+      - name: Exercise deployment failure and rollback
+        if: runner.os == 'Linux'
+        run: bash scripts/deploy-regression-test.sh
       - run: git diff --exit-code -- src/webui

@@ -1,70 +1,82 @@
-#!/bin/bash
-# Deploy script for nexus-gateway to remote server
+#!/usr/bin/env bash
+# Build, package, upload, and transactionally install Nexus Gateway over SSH.
+# The remote installer is also shipped in the artifact for independent tests.
 
-# Configure your remote server details
-REMOTE_HOST="${REMOTE_HOST:-your-server-ip}"
-REMOTE_USER="${REMOTE_USER:-your-username}"
-REMOTE_DIR="/home/$REMOTE_USER/nexus-gateway"
+set -Eeuo pipefail
 
-echo "=== Nexus Gateway Remote Deployment ==="
-echo "Target: $REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
-echo ""
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REMOTE_HOST="${NEXUS_REMOTE_HOST:-${REMOTE_HOST:-}}"
+REMOTE_USER="${NEXUS_REMOTE_USER:-${REMOTE_USER:-}}"
+REMOTE_DIR="${NEXUS_REMOTE_DIR:-${REMOTE_DIR:-/opt/nexus-gateway}}"
+REMOTE_SERVICE="${NEXUS_REMOTE_SERVICE:-nexus-agentd.service}"
+REMOTE_HEALTH_URL="${NEXUS_REMOTE_HEALTH_URL:-http://127.0.0.1:8787/health}"
+SSH_KEY_PATH="${NEXUS_SSH_KEY:-${SSH_KEY_PATH:-}}"
+SSH_PORT="${NEXUS_SSH_PORT:-${SSH_PORT:-22}}"
+REMOTE_TMP_PATH="${NEXUS_REMOTE_TMP:-/tmp/nexus-gateway.tar.gz}"
+ARTIFACT_PATH="${NEXUS_ARTIFACT_PATH:-$ROOT_DIR/nexus-gateway.tar.gz}"
+SKIP_BUILD="${NEXUS_SKIP_BUILD:-0}"
+REMOTE_SCRIPT="$ROOT_DIR/scripts/deploy-remote-install.sh"
+CURRENT_STAGE='argument validation'
 
-# Build locally first
-echo "Step 1: Building project locally..."
-npm run build
-if [ $? -ne 0 ]; then
-    echo "Build failed!"
-    exit 1
+if [[ "$ARTIFACT_PATH" != /* ]]; then
+    ARTIFACT_PATH="$ROOT_DIR/$ARTIFACT_PATH"
 fi
 
-echo ""
-echo "Step 2: Creating deployment package..."
-# Create a tar.gz with necessary files
-tar -czf nexus-gateway-deploy.tar.gz \
-    dist/ \
-    package.json \
-    package-lock.json \
-    README.md \
-    LICENSE \
-    nexus-agentd.example.json
+fail() {
+    printf 'deployment failed: %s\n' "$*" >&2
+    exit 1
+}
 
-echo ""
-echo "Step 3: Copying to remote server..."
-echo "Please enter password when prompted"
-scp nexus-gateway-deploy.tar.gz $REMOTE_USER@$REMOTE_HOST:/tmp/
+on_error() {
+    local status=$?
+    printf 'deployment failed during %s (exit %s)\n' "$CURRENT_STAGE" "$status" >&2
+    exit "$status"
+}
+trap on_error ERR
 
-echo ""
-echo "Step 4: Installing on remote server..."
-ssh $REMOTE_USER@$REMOTE_HOST << 'ENDSSH'
-    set -e
+quote_remote_arg() {
+    printf '%q' "$1"
+}
 
-    echo "Creating directory..."
-    mkdir -p ~/nexus-gateway
-    cd ~/nexus-gateway
+artifact_checksum() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print tolower($1)}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print tolower($1)}'
+    else
+        fail 'sha256sum or shasum is required to verify the uploaded artifact'
+    fi
+}
 
-    echo "Extracting files..."
-    tar -xzf /tmp/nexus-gateway-deploy.tar.gz
+[[ -n "$REMOTE_HOST" ]] || fail 'set NEXUS_REMOTE_HOST'
+[[ -n "$REMOTE_USER" ]] || fail 'set NEXUS_REMOTE_USER'
+[[ -n "$SSH_KEY_PATH" ]] || fail 'set NEXUS_SSH_KEY to an SSH private-key path'
+[[ -r "$SSH_KEY_PATH" ]] || fail "SSH private key is not readable: $SSH_KEY_PATH"
+[[ -r "$REMOTE_SCRIPT" ]] || fail "remote installer is missing: $REMOTE_SCRIPT"
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] || fail 'NEXUS_SSH_PORT must be numeric'
 
-    echo "Installing dependencies..."
-    npm install --production
+SSH_COMMON_OPTIONS=(-o BatchMode=yes -o IdentitiesOnly=yes -i "$SSH_KEY_PATH")
+SSH_OPTIONS=("${SSH_COMMON_OPTIONS[@]}" -p "$SSH_PORT")
+SCP_OPTIONS=("${SSH_COMMON_OPTIONS[@]}" -P "$SSH_PORT")
+SSH_TARGET="$REMOTE_USER@$REMOTE_HOST"
 
-    echo "Cleaning up..."
-    rm /tmp/nexus-gateway-deploy.tar.gz
+if [[ "$SKIP_BUILD" != '1' ]]; then
+    CURRENT_STAGE='building project'
+    (cd "$ROOT_DIR" && npm run build)
+fi
 
-    echo ""
-    echo "=== Installation Complete ==="
-    echo "To start the gateway, run:"
-    echo "  cd ~/nexus-gateway"
-    echo "  node dist/cli.js"
-    echo ""
-    echo "The WebUI will be available at:"
-    echo "  http://10.1.2.40:8787/"
-ENDSSH
+CURRENT_STAGE='creating deployment artifact'
+(cd "$ROOT_DIR" && node scripts/package-deploy.mjs --artifact "$ARTIFACT_PATH")
+[[ -r "$ARTIFACT_PATH" ]] || fail "deployment artifact was not created: $ARTIFACT_PATH"
 
-echo ""
-echo "Cleaning up local deployment package..."
-rm nexus-gateway-deploy.tar.gz
+CURRENT_STAGE='computing artifact checksum'
+ARTIFACT_SHA256="$(artifact_checksum "$ARTIFACT_PATH")"
 
-echo ""
-echo "=== Deployment Complete ==="
+CURRENT_STAGE='uploading deployment artifact'
+scp "${SCP_OPTIONS[@]}" "$ARTIFACT_PATH" "$SSH_TARGET:$REMOTE_TMP_PATH"
+
+CURRENT_STAGE='installing release on remote host'
+REMOTE_COMMAND="bash -s -- $(quote_remote_arg "$REMOTE_TMP_PATH") $(quote_remote_arg "$REMOTE_DIR") $(quote_remote_arg "$REMOTE_SERVICE") $(quote_remote_arg "$REMOTE_HEALTH_URL") $(quote_remote_arg "$ARTIFACT_SHA256")"
+ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$REMOTE_COMMAND" < "$REMOTE_SCRIPT"
+
+printf 'Deployment complete: %s at %s\n' "$REMOTE_SERVICE" "$REMOTE_HEALTH_URL"

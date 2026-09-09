@@ -19,24 +19,21 @@ const label =
         : String(address)
 console.log(`nexus-agentd listening on ${label}`)
 for (const url of displayUrls(address)) console.log(`WebUI: ${url}`)
-if (bootstrap.created) {
-    console.log(`Created config: ${configPath}`)
-    console.log('Setup required: open the WebUI and create the Console Password.')
-    if (runtime.config.listen.host !== '127.0.0.1' && runtime.config.listen.host !== '::1') {
-        console.warn(
-            'WARNING: first-run setup is reachable over the network; initialize it immediately on a trusted network.'
-        )
-    }
+if (bootstrap.created) console.log(`Created config: ${configPath}`)
+if (runtime.controlPlane.setupToken) {
+    console.log('Setup required: enter the following one-time setup token in the WebUI, then create the Console Password.')
+    console.log(`Setup token: ${runtime.controlPlane.setupToken}`)
+    console.warn('Keep this token private. It changes on restart. Use a trusted network or HTTPS for remote setup.')
 }
 
-let closing = false
-const close = async () => {
-    if (closing) return
-    closing = true
-    await runtime.close()
-}
-process.once('SIGINT', () => void close().finally(() => process.exit(0)))
-process.once('SIGTERM', () => void close().finally(() => process.exit(0)))
+let closing: Promise<void> | undefined
+const close = () => closing ??= runtime.close()
+const shutdown = () => void close().then(() => process.exit(0), (error) => {
+    console.error(JSON.stringify({ level: 'error', event: 'shutdown_failed', message: error instanceof Error ? error.message : String(error) }))
+    process.exit(1)
+})
+process.once('SIGINT', shutdown)
+process.once('SIGTERM', shutdown)
 
 function resolveConfigPath(args: string[]) {
     const index = args.indexOf('--config')

@@ -14,10 +14,6 @@ import { ManagedSession, SessionManager, SessionRequestError } from '../src/sess
 import { WorkspacePolicy } from '../src/workspace.js'
 import type { AgentdConfig } from '../src/types.js'
 
-// Deployment targets Linux. Windows taskkill has no guaranteed fallback;
-// exercise real process teardown on the supported platform instead.
-const posixOnly = { skip: process.platform === 'win32' ? 'Requires supported POSIX process teardown' : false }
-
 function session(protocol: 'acp' | 'a2a' = 'acp', workspace = process.cwd()) {
     return new ManagedSession('test', protocol, workspace, 'owner', 64, 64 * 1024, 'Test')
 }
@@ -40,7 +36,7 @@ async function until(check: () => boolean) {
 }
 
 for (const mode of ['hang-initialize', 'hang-session', 'ready']) {
-    test(`ACP startup bounds ${mode} and disposes its real child process`, posixOnly, async () => {
+    test(`ACP startup bounds ${mode} and disposes its real child process`, async () => {
         const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-startup-'))
         let child: ReturnType<typeof spawn> | undefined
         const state = session('acp', directory)
@@ -79,7 +75,7 @@ for (const mode of ['hang-initialize', 'hang-session', 'ready']) {
     })
 }
 
-test('ACP still kills its process and removes inputs when connection.close throws', posixOnly, async () => {
+test('ACP still kills its process and removes inputs when connection.close throws', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-dispose-'))
     const inputs = path.join(directory, 'inputs')
     await mkdir(inputs)

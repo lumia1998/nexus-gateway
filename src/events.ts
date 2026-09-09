@@ -40,10 +40,24 @@ export class SessionEventLog {
     }
 
     after(id?: string) {
-        const sequence = Number(id || 0)
-        return this.events
-            .filter((event) => Number(event.id) > sequence)
-            .map((event) => structuredClone(event))
+        return this.replay(id).events
+    }
+
+    replay(id?: string) {
+        const sequence = id === undefined ? 0 : Number(id)
+        const earliest = Number(this.events[0]?.id || this.sequence + 1)
+        const reason = id !== undefined && (!/^\d+$/.test(id) || !Number.isSafeInteger(sequence))
+            ? 'invalid'
+            : sequence > this.sequence ? 'ahead'
+            : sequence < earliest - 1 ? 'expired' : undefined
+        return {
+            earliestId: this.events[0]?.id ?? null,
+            latestId: String(this.sequence),
+            reset: reason ? { reason, requestedAfter: id ?? null } : undefined,
+            events: reason ? [] : this.events
+                .filter((event) => Number(event.id) > sequence)
+                .map((event) => structuredClone(event))
+        }
     }
 
     subscribe(listener: (event: AgentdEvent) => void) {

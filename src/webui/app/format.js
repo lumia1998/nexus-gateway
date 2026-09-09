@@ -33,7 +33,7 @@ export function runStatusLabel(value) {
 
 export function permissionLabel(value) {
   if (value === 'ask') return '询问'
-  if (value === 'allow') return '始终允许'
+  if (value === 'allow') return '自动允许单次'
   if (value === 'deny') return '拒绝'
   return value || '—'
 }

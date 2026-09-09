@@ -1,6 +1,54 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import { AdminSessionStore } from './auth.js'
+import { streamSessionEvents } from './server/connection.js'
+import {
+    DiagnosticConcurrencyError,
+    DiagnosticRunner
+} from './server/diagnostics.js'
+import {
+    ADMIN_COOKIE,
+    adminCookie,
+    assertAgentScope,
+    assertConsoleHost,
+    assertTrustedOrigin,
+    authenticateAdmin,
+    authenticateApiKey,
+    clearAdminCookie,
+    cookieValue,
+    isInitialized,
+    isMutating,
+    needsAdminSetup,
+    remoteKey,
+    stringHeader
+} from './server/auth-policy.js'
+import { GatewayMetrics } from './server/metrics.js'
+import { QuotaExceededError, QuotaManager } from './server/quota.js'
+import {
+    RequestError,
+    assertEmptyJsonBody,
+    assertJsonContentType,
+    assertOnlyKeys,
+    boundedLimit,
+    cleanQuery,
+    decodeHeader,
+    normalizePublishPaths,
+    normalizedMediaType,
+    optionalAttachmentIds,
+    optionalBoolean,
+    optionalNumber,
+    optionalPendingAction,
+    optionalRawString,
+    optionalRunState,
+    optionalString,
+    readBytesBody,
+    readJsonBody,
+    requiredInteger,
+    requiredMessage,
+    requiredRawString,
+    requiredString,
+    requiredStringArray
+} from './server/validation.js'
 import {
     ControlPlaneError,
     type AgentdAgentUpdate,
@@ -15,19 +63,24 @@ import {
     SessionRequestError
 } from './session.js'
 import type {
+    AdminRetryReservation,
+    AdminRetryReservationFactory
+} from './session/admin-runs.js'
+import type { ArtifactReadResult } from './run-store.js'
+import type {
     A2AAuthType,
-    AgentdApiKeyPrincipal,
     AgentdApiKeyScope,
     AgentdConfig,
     AgentdDriverKind,
-    AgentdEvent,
     AgentdPendingResponse,
     AgentdProtocol,
     PermissionPolicy
 } from './types.js'
 import { redirectToAgentdWebUi, writeAgentdWebUi, writeAgentdWebUiModule } from './webui/index.js'
 
-const ADMIN_COOKIE = 'agent_nexus_admin'
+export { QuotaExceededError, QuotaManager, quotaLimitsFromConfig } from './server/quota.js'
+export { DiagnosticRunner, DiagnosticConcurrencyError } from './server/diagnostics.js'
+export { GatewayMetrics } from './server/metrics.js'
 
 export function createAgentdServer(
     config: AgentdConfig,
@@ -39,10 +92,61 @@ export function createAgentdServer(
     )
     const loginLimiter = new FailureRateLimiter(8, 60_000, 5 * 60_000)
     const apiLimiter = new FailureRateLimiter(30, 60_000, 60_000)
+    const setupLimiter = new FailureRateLimiter(8, 60_000, 60_000)
+    const revealLimiter = new FailureRateLimiter(20, 60_000, 60_000)
+    const quota = new QuotaManager(config)
+    const metrics = new GatewayMetrics()
+    const diagnostics = new DiagnosticRunner(2)
     let sseConnections = 0
+    const sessionReservations = new Map<string, () => void>()
+    const uploadReservations = new Map<string, () => void>()
+    const runReservations = new Map<string, () => void>()
+    // SessionManager emits terminal run transitions independently of HTTP
+    // requests. Release the per-key running slot at that boundary so an
+    // asynchronous completion cannot strand a quota reservation until the
+    // next poll.
+    const releaseRunReservationById = (sessionId: string) => {
+        const release = runReservations.get(sessionId)
+        if (release) release()
+        else quota.finishRun(sessionId)
+    }
+    const releaseSessionReservationsById = (sessionId: string) => {
+        const releaseSession = sessionReservations.get(sessionId)
+        if (releaseSession) {
+            sessionReservations.delete(sessionId)
+            releaseSession()
+        }
+        const releaseUpload = uploadReservations.get(sessionId)
+        if (releaseUpload) {
+            uploadReservations.delete(sessionId)
+            releaseUpload()
+        }
+        releaseRunReservationById(sessionId)
+    }
+    const subscribeLifecycle = (sessions as unknown as {
+        subscribeLifecycle?: (listener: (event: {
+            type: string
+            sessionId: string
+            state?: string
+        }) => void) => (() => void)
+    }).subscribeLifecycle
+    const unsubscribeLifecycle = typeof subscribeLifecycle === 'function'
+        ? subscribeLifecycle.call(sessions, (event) => {
+            if (event.type === 'run_updated' && event.state && isTerminalState(event.state)) {
+                releaseRunReservationById(event.sessionId)
+            }
+            if (event.type === 'session_closed') {
+                releaseSessionReservationsById(event.sessionId)
+            }
+        })
+        : undefined
     const server = http.createServer((request, response) => {
         const requestId = randomUUID()
+        metrics.requestStarted()
         response.setHeader('X-Request-Id', requestId)
+        response.once('finish', () => {
+            metrics.responseFinished(response.statusCode, response.statusCode === 429)
+        })
         void handleRequest({
             config,
             sessions,
@@ -50,22 +154,44 @@ export function createAgentdServer(
             adminSessions,
             loginLimiter,
             apiLimiter,
+            setupLimiter,
+            revealLimiter,
+            quota,
+            metrics,
+            diagnostics,
+            sessionReservations,
+            uploadReservations,
+            runReservations,
+            currentSse: () => sseConnections,
             request,
             response,
-            acquireSse() {
-                if (sseConnections >= (config.maxSseConnections || 128)) return false
+            acquireSse(keyId: string) {
+                if (sseConnections >= (config.maxSseConnections || 128)) {
+                    throw new QuotaExceededError(
+                        'sse',
+                        config.maxSseConnections || 128,
+                        sseConnections,
+                        1_000
+                    )
+                }
+                const releaseQuota = quota.reserveSse(keyId)
                 sseConnections += 1
-                return true
+                return () => {
+                    releaseQuota()
+                    sseConnections = Math.max(0, sseConnections - 1)
+                }
             },
-            releaseSse() {
-                sseConnections = Math.max(0, sseConnections - 1)
-            }
         }).catch((error) => {
             if (response.headersSent) {
                 response.destroy(error instanceof Error ? error : undefined)
                 return
             }
             const status = errorStatus(error)
+            if (error instanceof QuotaExceededError || error instanceof DiagnosticConcurrencyError) {
+                const retryAfterMs = error.retryAfterMs
+                response.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))))
+                response.setHeader('X-Quota-Type', error instanceof QuotaExceededError ? error.quota : 'diagnostics')
+            }
             if (status >= 500) {
                 console.error(
                     JSON.stringify({
@@ -79,17 +205,24 @@ export function createAgentdServer(
                     })
                 )
             }
-            writeJson(response, status, {
-                error: status >= 500 ? 'Internal server error' : errorMessage(error),
-                requestId
-            })
+            writeError(response, status, error, requestId)
         })
     })
     server.requestTimeout = config.requestTimeoutMs || 30_000
     server.headersTimeout = Math.min(server.requestTimeout, 20_000)
     server.keepAliveTimeout = 5_000
     server.maxConnections = config.maxConnections || 256
-    server.once('close', () => adminSessions.clear())
+    server.once('close', () => {
+        unsubscribeLifecycle?.()
+        for (const sessionId of new Set([
+            ...sessionReservations.keys(),
+            ...uploadReservations.keys(),
+            ...runReservations.keys()
+        ])) {
+            releaseSessionReservationsById(sessionId)
+        }
+        adminSessions.clear()
+    })
     return server
 }
 
@@ -100,10 +233,18 @@ interface RequestContext {
     adminSessions: AdminSessionStore
     loginLimiter: FailureRateLimiter
     apiLimiter: FailureRateLimiter
+    setupLimiter: FailureRateLimiter
+    revealLimiter: FailureRateLimiter
+    quota: QuotaManager
+    metrics: GatewayMetrics
+    diagnostics: DiagnosticRunner
+    sessionReservations: Map<string, () => void>
+    uploadReservations: Map<string, () => void>
+    runReservations: Map<string, () => void>
+    currentSse(): number
     request: IncomingMessage
     response: ServerResponse
-    acquireSse(): boolean
-    releaseSse(): void
+    acquireSse(keyId: string): (() => void) | false
 }
 
 async function handleRequest(context: RequestContext) {
@@ -118,6 +259,9 @@ async function handleRequest(context: RequestContext) {
         response
     } = context
     const url = new URL(request.url || '/', 'http://localhost')
+    if (url.pathname === '/' || url.pathname.startsWith('/ui') || url.pathname.startsWith('/v1/admin/') || url.pathname.startsWith('/v1/bootstrap/')) {
+        assertConsoleHost(request, config)
+    }
 
     if (url.pathname === '/' && request.method === 'GET') {
         redirectToAgentdWebUi(response)
@@ -149,9 +293,16 @@ async function handleRequest(context: RequestContext) {
     if (url.pathname === '/v1/bootstrap/initialize' && request.method === 'POST') {
         if (!controlPlane) throw new RequestError(404, 'Control plane is unavailable')
         assertJsonContentType(request)
-        assertTrustedOrigin(request, true)
+        assertTrustedOrigin(request, config)
+        if (!needsAdminSetup(config, controlPlane)) throw new RequestError(409, 'Console setup is already complete')
+        const rateKey = remoteKey(request)
+        context.setupLimiter.assertAllowed(rateKey)
         const body = await readJsonBody(request, config.maxRequestBytes)
-        assertOnlyKeys(body, ['password', 'confirmPassword'])
+        assertOnlyKeys(body, ['password', 'confirmPassword', 'setupToken'])
+        if (!controlPlane.verifySetupToken(optionalRawString(body.setupToken, 'setupToken') || '')) {
+            context.setupLimiter.failure(rateKey)
+            throw new RequestError(403, 'Invalid setup token')
+        }
         writeJson(
             response,
             201,
@@ -177,14 +328,16 @@ async function handleRequest(context: RequestContext) {
             throw new RequestError(428, 'Console setup is required')
         }
         assertJsonContentType(request)
-        assertTrustedOrigin(request, true)
+        assertTrustedOrigin(request, config)
         const rateKey = remoteKey(request)
         loginLimiter.assertAllowed(rateKey)
         const body = await readJsonBody(request, config.maxRequestBytes)
         assertOnlyKeys(body, ['password'])
         const password = requiredRawString(body.password, 'password')
+        // Reserve the attempt before asynchronous scrypt, including concurrent requests.
+        loginLimiter.assertAllowed(rateKey)
+        loginLimiter.failure(rateKey)
         if (!(await controlPlane.verifyAdminPassword(password))) {
-            loginLimiter.failure(rateKey)
             throw new RequestError(401, 'Invalid Console Password')
         }
         loginLimiter.success(rateKey)
@@ -197,7 +350,7 @@ async function handleRequest(context: RequestContext) {
         return
     }
     if (url.pathname === '/v1/admin/auth/logout' && request.method === 'POST') {
-        assertTrustedOrigin(request, true)
+        assertTrustedOrigin(request, config)
         const id = cookieValue(request, ADMIN_COOKIE)
         if (id) adminSessions.delete(id)
         response.setHeader('Set-Cookie', clearAdminCookie(config))
@@ -212,7 +365,7 @@ async function handleRequest(context: RequestContext) {
     if (url.pathname.startsWith('/v1/admin/')) {
         if (!controlPlane) throw new RequestError(404, 'Control plane is unavailable')
         authenticateAdmin(request, adminSessions)
-        if (isMutating(request.method)) assertTrustedOrigin(request, true)
+        if (isMutating(request.method)) assertTrustedOrigin(request, config)
         await handleAdminRoute(context, url)
         return
     }
@@ -231,17 +384,40 @@ async function handleRequest(context: RequestContext) {
         })
         return
     }
+
+    const dataArtifactMatch = url.pathname.match(
+        /^\/v1\/runs\/([^/]+)\/artifacts\/([^/]+)$/
+    )
+    if (dataArtifactMatch && request.method === 'GET') {
+        const runId = decodeURIComponent(dataArtifactMatch[1])
+        const artifactId = decodeURIComponent(dataArtifactMatch[2])
+        const run = await getRunForDataPlane(sessions, runId, principal.id)
+        assertAgentScope(principal, run.agentId)
+        await writeRunArtifact(response, sessions, run, artifactId)
+        return
+    }
     if (url.pathname === '/v1/sessions' && request.method === 'POST') {
         assertJsonContentType(request)
         const body = await readJsonBody(request, config.maxRequestBytes)
         assertOnlyKeys(body, ['agentId', 'workspace'])
         const agentId = requiredString(body.agentId, 'agentId')
         assertAgentScope(principal, agentId)
-        writeJson(
-            response,
-            201,
-            await sessions.create(agentId, optionalString(body.workspace), principal.id)
-        )
+        // Reserve before the asynchronous startup path.  The reservation is
+        // retained until the session is explicitly closed so a key cannot
+        // fill the process with terminal-but-held sessions.
+        const releaseSession = context.quota.reserveSession(principal.id)
+        try {
+            const created = await sessions.create(
+                agentId,
+                optionalString(body.workspace),
+                principal.id
+            )
+            context.sessionReservations.set(created.id, releaseSession)
+            writeJson(response, 201, created)
+        } catch (error) {
+            releaseSession()
+            throw error
+        }
         return
     }
 
@@ -253,20 +429,41 @@ async function handleRequest(context: RequestContext) {
             throw new RequestError(404, 'Session not found')
         }
         assertAgentScope(principal, session.agentId)
-        const bytes = await readBytesBody(
-            request,
-            config.maxAttachmentBytes || 32 * 1024 * 1024
-        )
-        writeJson(
-            response,
-            201,
-            sessions.addInputAttachment(
+        const declared = Number(request.headers['content-length'])
+        // When a length is supplied, reject before consuming the body. This
+        // keeps a rejected upload from needlessly buffering a request and
+        // makes quota failures deterministic under concurrent uploads.
+        const preflightUpload = Number.isFinite(declared) && declared > 0
+            ? context.quota.reserveUpload(principal.id, declared)
+            : undefined
+        let releaseUpload: (() => void) | undefined
+        try {
+            const bytes = await readBytesBody(
+                request,
+                config.maxAttachmentBytes || 32 * 1024 * 1024
+            )
+            preflightUpload?.()
+            releaseUpload = context.quota.reserveUpload(principal.id, bytes.length)
+            const attachment = sessions.addInputAttachment(
                 sessionId,
                 decodeHeader(request.headers['x-nexus-file-name']) || 'attachment',
                 normalizedMediaType(request.headers['content-type']),
                 bytes
             )
-        )
+            const previous = context.uploadReservations.get(sessionId)
+            if (previous) {
+                // Compose releases so closing the session returns the entire
+                // retained upload budget exactly once.
+                context.uploadReservations.set(sessionId, composeReleases(previous, releaseUpload))
+            } else {
+                context.uploadReservations.set(sessionId, releaseUpload)
+            }
+            writeJson(response, 201, attachment)
+        } catch (error) {
+            preflightUpload?.()
+            releaseUpload?.()
+            throw error
+        }
         return
     }
 
@@ -287,7 +484,7 @@ async function handleRequest(context: RequestContext) {
         const resolution: AgentdPendingResponse = {
             requestId,
             message: optionalString(body.message),
-            optionId: optionalString(body.optionId),
+            optionId: optionalRawString(body.optionId, 'optionId'),
             action: optionalPendingAction(body.action)
         }
         if (
@@ -297,15 +494,19 @@ async function handleRequest(context: RequestContext) {
         ) {
             throw new RequestError(400, 'A pending response is required')
         }
-        writeJson(
-            response,
-            202,
-            await sessions.resolvePending(
+        const releaseRun = reserveRunIfNeeded(context, principal.id, sessionId, session.state)
+        try {
+            const updated = await sessions.resolvePending(
                 sessionId,
                 resolution,
                 optionalAttachmentIds(body.attachments)
             )
-        )
+            if (isTerminalState(updated.state)) releaseRunReservation(context, sessionId)
+            writeJson(response, 202, updated)
+        } catch (error) {
+            releaseRun?.()
+            throw error
+        }
         return
     }
 
@@ -342,46 +543,60 @@ async function handleRequest(context: RequestContext) {
         throw new RequestError(404, 'Session not found')
     }
     assertAgentScope(principal, session.agentId)
+    reconcileRunReservation(context, principal.id, sessionId, session.state)
 
     if (!action && request.method === 'GET') {
         writeJson(response, 200, session)
         return
     }
     if (!action && request.method === 'DELETE') {
-        writeJson(response, 200, await sessions.close(sessionId))
+        const closed = await sessions.close(sessionId)
+        releaseSessionReservations(context, sessionId)
+        releaseRunReservation(context, sessionId)
+        writeJson(response, 200, closed)
         return
     }
     if (action === 'message' && request.method === 'POST') {
         assertJsonContentType(request)
         const body = await readJsonBody(request, config.maxRequestBytes)
         assertOnlyKeys(body, ['message', 'attachments'])
-        writeJson(
-            response,
-            202,
-            await sessions.message(
+        const releaseRun = reserveRunIfNeeded(context, principal.id, sessionId, session.state)
+        try {
+            const updated = await sessions.message(
                 sessionId,
                 requiredMessage(body.message),
                 optionalAttachmentIds(body.attachments)
             )
-        )
+            if (isTerminalState(updated.state)) releaseRunReservation(context, sessionId)
+            writeJson(response, 202, updated)
+        } catch (error) {
+            releaseRun?.()
+            throw error
+        }
         return
     }
     if (action === 'cancel' && request.method === 'POST') {
         await assertEmptyJsonBody(request, config.maxRequestBytes)
-        writeJson(response, 200, await sessions.cancel(sessionId))
+        const canceled = await sessions.cancel(sessionId)
+        releaseRunReservation(context, sessionId)
+        writeJson(response, 200, canceled)
         return
     }
     if (action === 'events' && request.method === 'GET') {
-        if (!context.acquireSse()) {
+        const releaseSse = context.acquireSse(principal.id)
+        if (!releaseSse) {
             throw new RequestError(429, 'SSE connection capacity has been reached')
         }
-        streamEvents(
+        streamSessionEvents(
             request,
             response,
             sessions,
             sessionId,
-            url.searchParams.get('after') || stringHeader(request.headers['last-event-id']),
-            context.releaseSse
+            url.searchParams.get('after') ?? (stringHeader(request.headers['last-event-id']) || undefined),
+            releaseSse,
+            (close) => controlPlane?.watchApiKey(
+                principal.id, stringHeader(request.headers.authorization).slice(7), session.agentId, close
+            ) || (() => {})
         )
         return
     }
@@ -389,12 +604,57 @@ async function handleRequest(context: RequestContext) {
 }
 
 async function handleAdminRoute(context: RequestContext, url: URL) {
-    const { config, sessions, controlPlane, adminSessions, request, response } = context
+    const {
+        config,
+        sessions,
+        controlPlane,
+        adminSessions,
+        request,
+        response,
+        metrics,
+        diagnostics
+    } = context
     if (!controlPlane) throw new RequestError(404, 'Control plane is unavailable')
 
     if (url.pathname === '/v1/admin/overview' && request.method === 'GET') {
         const agents = await sessions.listAgents(undefined, url.searchParams.get('refresh') === '1')
         writeJson(response, 200, { agents, sessions: sessions.count() })
+        return
+    }
+    if (url.pathname === '/v1/admin/metrics' && request.method === 'GET') {
+        const all = sessions.listRuns({ limit: 1 })
+        const actionStates = new Set(['failed', 'input_required', 'permission_required'])
+        const recent = new Map<string, any>()
+        for (const state of actionStates) {
+            for (const run of sessions.listRuns({ state: state as import('./types.js').AgentdSessionState, limit: 5 }).runs) {
+                recent.set(run.id, run)
+            }
+        }
+        const recentRuns = Array.from(recent.values())
+            .sort((left, right) => right.updatedAt - left.updatedAt)
+            .slice(0, 5)
+        const baseStats = all.stats || { active: 0, completed: 0, failed: 0 }
+        const runStats = {
+            active: Number(baseStats.active) || 0,
+            completed: Number(baseStats.completed) || 0,
+            failed: Number(baseStats.failed) || 0,
+            total: Number(all.total) || 0
+        }
+        writeJson(
+            response,
+            200,
+            await metrics.snapshot({
+                sessions: sessions.count(),
+                currentSse: currentSseCount(context),
+                runs: runStats,
+                recentRuns,
+                storagePath: config.workspaceRoots[0],
+                storageMetrics: (sessions as unknown as {
+                    getStorageMetrics?: () => ReturnType<SessionManager['getStorageMetrics']>
+                }).getStorageMetrics?.(),
+                quotas: context.quota
+            })
+        )
         return
     }
     if (url.pathname === '/v1/admin/config' && request.method === 'GET') {
@@ -418,14 +678,55 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
                 sessionId: cleanQuery(url.searchParams.get('sessionId')),
                 state,
                 query: cleanQuery(url.searchParams.get('q')),
+                offset: boundedOffset(url.searchParams.get('offset')),
                 limit: boundedLimit(url.searchParams.get('limit'))
             })
         )
         return
     }
+    const runActionMatch = url.pathname.match(
+        /^\/v1\/admin\/runs\/([^/]+)\/(cancel|retry|respond)$/
+    )
+    if (runActionMatch) {
+        await handleAdminRunAction(context, decodeURIComponent(runActionMatch[1]), runActionMatch[2] as 'cancel' | 'retry' | 'respond')
+        return
+    }
+    const adminArtifactMatch = url.pathname.match(
+        /^\/v1\/admin\/runs\/([^/]+)\/artifacts\/([^/]+)$/
+    )
+    if (adminArtifactMatch && request.method === 'GET') {
+        const run = sessions.getRun(decodeURIComponent(adminArtifactMatch[1]))
+        await writeRunArtifact(
+            response,
+            sessions,
+            run,
+            decodeURIComponent(adminArtifactMatch[2])
+        )
+        return
+    }
     const runMatch = url.pathname.match(/^\/v1\/admin\/runs\/([^/]+)$/)
     if (runMatch && request.method === 'GET') {
-        writeJson(response, 200, sessions.getRun(decodeURIComponent(runMatch[1])))
+        const runId = decodeURIComponent(runMatch[1])
+        const detail = sessions.getRun(runId)
+        writeJson(response, 200, {
+            ...detail,
+            controls: buildRunControls(sessions, detail)
+        })
+        return
+    }
+    const diagnosticMatch = url.pathname.match(/^\/v1\/admin\/agents\/([^/]+)\/diagnostics$/)
+    if (diagnosticMatch && request.method === 'POST') {
+        await assertEmptyJsonBody(request, config.maxRequestBytes)
+        const agentId = decodeURIComponent(diagnosticMatch[1])
+        const configured = controlPlane.snapshot().agents.find((agent) => agent.id === agentId)
+        const workspace = configured?.workspace
+        const result = await diagnostics.run(
+            sessions,
+            agentId,
+            workspace,
+            configured as any
+        )
+        writeJson(response, result.status === 'busy' ? 429 : 200, result)
         return
     }
     if (url.pathname === '/v1/admin/config/workspace-roots' && request.method === 'PUT') {
@@ -495,7 +796,12 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
         const action = keyMatch[2]
         if (action === 'reveal' && request.method === 'POST') {
             await assertEmptyJsonBody(request, config.maxRequestBytes)
-            writeJson(response, 200, controlPlane.revealApiKey(id))
+            const rateKey = remoteKey(request)
+            context.revealLimiter.assertAllowed(rateKey)
+            context.revealLimiter.failure(rateKey)
+            const result = controlPlane.revealApiKey(id)
+            console.info(JSON.stringify({ level: 'info', event: 'api_key_revealed', keyId: id, requestId: response.getHeader('X-Request-Id'), remoteAddress: rateKey }))
+            writeJson(response, 200, result)
             return
         }
         if (action === 'regenerate' && request.method === 'POST') {
@@ -534,6 +840,436 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
     throw new RequestError(404, 'Route not found')
 }
 
+async function handleAdminRunAction(
+    context: RequestContext,
+    runId: string,
+    action: 'cancel' | 'retry' | 'respond'
+) {
+    const { config, sessions, request, response } = context
+    const requestId = String(response.getHeader('X-Request-Id') || '')
+    let detail: ReturnType<SessionManager['getRun']> | undefined
+    let sessionId = ''
+    let agentId = ''
+    let ownerKeyId: string | undefined
+    try {
+        if (request.method !== 'POST') throw new RequestError(405, 'Method not allowed')
+        detail = sessions.getRun(runId)
+        sessionId = detail.sessionId
+        agentId = detail.agentId
+        ownerKeyId = runOwnerKeyId(sessions, runId)
+        const controls = buildRunControls(sessions, detail)
+        if (action === 'cancel' && !controls.canCancel) {
+            throw new RequestError(409, controls.unavailableReason || 'Run cannot be canceled')
+        }
+        if (action === 'retry' && !controls.canRetry) {
+            throw new RequestError(409, controls.unavailableReason || 'Run cannot be retried')
+        }
+        if (action === 'cancel' || action === 'retry') {
+            await assertEmptyJsonBody(request, config.maxRequestBytes)
+        }
+
+        let input: AgentdPendingResponse | undefined
+        if (action === 'respond') input = await readAdminRunResponse(request, config.maxRequestBytes)
+        // AdminRunManager calls this factory only after its synchronous retry
+        // deduplication gate accepts a genuinely new retry. This keeps a
+        // completed duplicate from consuming either session or run quota.
+        const reserveRetry = action === 'retry'
+            ? (keyId: string) => reserveAdminRetry(context, keyId)
+            : undefined
+        const result = await invokeRunAction(
+            sessions,
+            action,
+            runId,
+            sessionId,
+            input,
+            reserveRetry
+        )
+        const resultRunId = action === 'retry'
+            ? actionResultString(result, 'runId') || actionResultRecord(result, 'run')?.id || runId
+            : runId
+        const resultSessionId = action === 'retry'
+            ? actionResultString(result, 'sessionId') || actionResultRecord(result, 'session')?.id || ''
+            : sessionId
+        if (!resultSessionId && action === 'retry') {
+            throw new RequestError(502, 'Retry did not return a session')
+        }
+        const state = actionResultString(result, 'state') ||
+            actionResultRecord(result, 'session')?.state ||
+            actionResultRecord(result, 'run')?.state
+        if (action === 'cancel' || state === 'canceled') releaseRunReservation(context, sessionId)
+        if (action === 'retry' && state && isTerminalState(state) && resultSessionId) {
+            releaseRunReservation(context, resultSessionId)
+        }
+        auditAdminRunAction({
+            action,
+            runId,
+            sessionId,
+            agentId,
+            keyId: ownerKeyId,
+            requestId,
+            result: 'accepted'
+        })
+        if (action === 'retry') {
+            writeJson(response, 202, { runId: resultRunId, sessionId: resultSessionId })
+        } else {
+            writeJson(response, 202, {
+                runId,
+                sessionId,
+                ...(state ? { state } : {}),
+                result: 'accepted'
+            })
+        }
+    } catch (error) {
+        auditAdminRunAction({
+            action,
+            runId,
+            sessionId,
+            agentId,
+            keyId: ownerKeyId,
+            requestId,
+            result: 'failed'
+        })
+        throw error
+    }
+}
+
+async function readAdminRunResponse(request: IncomingMessage, maxBytes: number) {
+    assertJsonContentType(request)
+    const body = await readJsonBody(request, maxBytes)
+    assertOnlyKeys(body, ['requestId', 'message', 'optionId', 'action'])
+    const result: AgentdPendingResponse = {
+        requestId: requiredString(body.requestId, 'requestId'),
+        message: optionalRawString(body.message, 'message'),
+        optionId: optionalRawString(body.optionId, 'optionId'),
+        action: optionalPendingAction(body.action)
+    }
+    if (!result.message?.trim() && !result.optionId && !result.action) {
+        throw new RequestError(400, 'A pending response is required')
+    }
+    return result
+}
+
+async function invokeRunAction(
+    sessions: SessionManager,
+    action: 'cancel' | 'retry' | 'respond',
+    runId: string,
+    sessionId: string,
+    input?: AgentdPendingResponse,
+    reserveRetry?: AdminRetryReservationFactory
+) {
+    const target = sessions as unknown as Record<string, any>
+    const candidates = action === 'cancel'
+        ? ['cancelRun', 'cancelByRunId']
+        : action === 'retry'
+          ? ['retryRun', 'retryByRunId']
+          : ['respondRun', 'respondByRunId']
+    for (const name of candidates) {
+        if (typeof target[name] !== 'function') continue
+        if (action === 'respond') return target[name].call(sessions, runId, input)
+        if (action === 'retry') return target[name].call(sessions, runId, reserveRetry)
+        return target[name].call(sessions, runId)
+    }
+
+    // Cancellation and pending responses can be safely delegated through the
+    // existing SessionManager methods. Retry intentionally has no fallback:
+    // reconstructing a prompt here could duplicate a run or lose attachments.
+    if (action === 'cancel' && typeof target.cancel === 'function') {
+        return target.cancel.call(sessions, sessionId)
+    }
+    if (action === 'respond' && typeof target.resolvePending === 'function') {
+        return target.resolvePending.call(sessions, sessionId, input)
+    }
+    throw new RequestError(409, `Run ${action} is unavailable`)
+}
+
+function buildRunControls(sessions: SessionManager, detail: any) {
+    const target = sessions as unknown as Record<string, any>
+    if (typeof target.getRunControls === 'function') {
+        try {
+            return structuredClone(target.getRunControls(detail.id))
+        } catch {
+            // Fall through to the compatibility calculation for embedders
+            // that expose getRunControls only for newer run records.
+        }
+    }
+    let session: any
+    try {
+        session = sessions.get(detail.sessionId)
+    } catch {
+        session = undefined
+    }
+    const active = isActiveState(detail.state)
+    const canCancel = active && (
+        typeof target.cancelRun === 'function' ||
+        typeof target.cancelByRunId === 'function' ||
+        typeof target.cancel === 'function'
+    )
+    const canRetry = (detail.state === 'failed' || detail.state === 'canceled') && (
+        typeof target.retryRun === 'function' || typeof target.retryByRunId === 'function'
+    )
+    const pendingRequest = session?.pendingRequest || detail.pendingRequest
+    const unavailableReason = !session && active
+        ? 'Session is no longer available'
+        : active && !canCancel
+          ? 'Cancellation is unavailable'
+          : (detail.state === 'failed' || detail.state === 'canceled') && !canRetry
+            ? 'Retry is unavailable'
+            : undefined
+    return {
+        canCancel,
+        canRetry,
+        ...(pendingRequest ? { pendingRequest: structuredClone(pendingRequest) } : {}),
+        ...(unavailableReason ? { unavailableReason } : {})
+    }
+}
+
+function runOwnerKeyId(sessions: SessionManager, runId: string) {
+    const target = sessions as unknown as Record<string, any>
+    for (const name of ['getRunOwnerKeyId', 'runOwnerKeyId', 'ownerKeyForRun']) {
+        if (typeof target[name] !== 'function') continue
+        const value = target[name].call(sessions, runId)
+        if (typeof value === 'string' && value) return value
+    }
+    return undefined
+}
+
+function actionResultString(value: unknown, key: string) {
+    return isRecord(value) && typeof value[key] === 'string' ? value[key] : undefined
+}
+
+function actionResultRecord(value: unknown, key: string) {
+    return isRecord(value) && isRecord(value[key]) ? value[key] as Record<string, any> : undefined
+}
+
+function auditAdminRunAction(input: {
+    action: string
+    runId: string
+    sessionId?: string
+    agentId?: string
+    keyId?: string
+    requestId: string
+    result: string
+}) {
+    console.info(JSON.stringify({
+        level: 'info',
+        event: 'admin_run_action',
+        ...input,
+        ...(input.sessionId ? {} : { sessionId: undefined }),
+        ...(input.agentId ? {} : { agentId: undefined }),
+        ...(input.keyId ? {} : { keyId: undefined })
+    }))
+}
+
+async function getRunForDataPlane(
+    sessions: SessionManager,
+    runId: string,
+    ownerKeyId: string
+): Promise<any> {
+    const target = sessions as unknown as Record<string, any>
+    for (const name of ['getRunForOwner', 'getRunOwnedBy']) {
+        if (typeof target[name] !== 'function') continue
+        const result = await target[name].call(sessions, runId, ownerKeyId)
+        if (!result) throw new RequestError(404, 'Run not found')
+        return result
+    }
+    if (typeof target.ownsRun === 'function') {
+        const owned = await target.ownsRun.call(sessions, runId, ownerKeyId)
+        if (!owned) throw new RequestError(404, 'Run not found')
+    }
+    const run = sessions.getRun(runId)
+    if (typeof target.ownsRun !== 'function') {
+        // Before the worker adds a direct RunStore wrapper, use the original
+        // Session ownership check. It deliberately fails closed for persisted
+        // runs whose in-memory Session has already been evicted.
+        try {
+            if (!sessions.owns(run.sessionId, ownerKeyId)) throw new Error()
+        } catch {
+            throw new RequestError(404, 'Run not found')
+        }
+    }
+    return run
+}
+
+async function writeRunArtifact(
+    response: ServerResponse,
+    sessions: SessionManager,
+    run: any,
+    artifactId: string
+) {
+    const artifact = Array.isArray(run.artifacts)
+        ? run.artifacts.find((value: any) => value?.id === artifactId)
+        : undefined
+    if (!artifact) throw new RequestError(404, 'Artifact not found')
+    const payload = await resolveArtifactPayload(sessions, run.id, artifactId)
+    if (!payload) throw new RequestError(404, 'Artifact bytes are unavailable')
+    const filename = safeDownloadFilename(payload.filename || artifact.filename || artifact.name || artifactId)
+    const mediaType = cleanMediaType(payload.mediaType || artifact.mediaType)
+    response.writeHead(200, {
+        'Content-Type': mediaType,
+        'Content-Length': payload.bytes.length,
+        'Content-Disposition': contentDisposition(filename),
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff'
+    })
+    response.end(payload.bytes)
+}
+
+async function resolveArtifactPayload(
+    sessions: SessionManager,
+    runId: string,
+    artifactId: string
+): Promise<ArtifactReadResult | undefined> {
+    return sessions.readRunArtifact(runId, artifactId) as Promise<ArtifactReadResult | undefined>
+}
+
+function safeDownloadFilename(value: unknown) {
+    const text = String(value || 'artifact')
+        .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180)
+    return text || 'artifact'
+}
+
+function contentDisposition(filename: string) {
+    const fallback = filename.replace(/[^A-Za-z0-9._-]/g, '_') || 'artifact'
+    return `attachment; filename="${fallback.replace(/"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+}
+
+function cleanMediaType(value: unknown) {
+    const text = typeof value === 'string' ? value.split(';', 1)[0].trim().toLowerCase() : ''
+    return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(text)
+        ? text
+        : 'application/octet-stream'
+}
+
+function currentSseCount(context: RequestContext) {
+    return context.currentSse()
+}
+
+function reserveRunIfNeeded(
+    context: RequestContext,
+    keyId: string,
+    sessionId: string,
+    state: string
+) {
+    if (isTerminalState(state)) {
+        releaseRunReservation(context, sessionId)
+        return undefined
+    }
+    if (context.runReservations.has(sessionId)) return undefined
+    const releaseQuota = context.quota.reserveRunningRun(keyId, sessionId)
+    let released = false
+    const release = () => {
+        if (released) return
+        released = true
+        if (context.runReservations.get(sessionId) === release) context.runReservations.delete(sessionId)
+        releaseQuota()
+    }
+    context.runReservations.set(sessionId, release)
+    return release
+}
+
+function reconcileRunReservation(
+    context: RequestContext,
+    keyId: string,
+    sessionId: string,
+    state: string
+) {
+    if (isTerminalState(state)) {
+        releaseRunReservation(context, sessionId)
+        context.quota.finishRun(sessionId, keyId)
+    }
+}
+
+function releaseRunReservation(context: RequestContext, sessionId: string) {
+    const release = context.runReservations.get(sessionId)
+    if (release) release()
+    else context.quota.finishRun(sessionId)
+}
+
+function releaseSessionReservations(context: RequestContext, sessionId: string) {
+    const releaseSession = context.sessionReservations.get(sessionId)
+    if (releaseSession) {
+        context.sessionReservations.delete(sessionId)
+        releaseSession()
+    }
+    const releaseUpload = context.uploadReservations.get(sessionId)
+    if (releaseUpload) {
+        context.uploadReservations.delete(sessionId)
+        releaseUpload()
+    }
+}
+
+function reserveAdminRetry(
+    context: RequestContext,
+    keyId: string
+): AdminRetryReservation {
+    const releaseSessionQuota = context.quota.reserveSession(keyId)
+    let releaseRunQuota: (() => void) | undefined
+    try {
+        releaseRunQuota = context.quota.reserveRunningRun(keyId)
+    } catch (error) {
+        releaseSessionQuota()
+        throw error
+    }
+
+    let sessionId: string | undefined
+    let sessionReleased = false
+    let runReleased = false
+    const releaseSession = () => {
+        if (sessionReleased) return
+        sessionReleased = true
+        if (sessionId && context.sessionReservations.get(sessionId) === releaseSession) {
+            context.sessionReservations.delete(sessionId)
+        }
+        releaseSessionQuota()
+    }
+    const releaseRun = () => {
+        if (runReleased) return
+        runReleased = true
+        if (sessionId && context.runReservations.get(sessionId) === releaseRun) {
+            context.runReservations.delete(sessionId)
+        }
+        releaseRunQuota?.()
+    }
+
+    return {
+        bind(id: string) {
+            if (sessionId) return
+            sessionId = id
+            context.sessionReservations.set(id, releaseSession)
+            context.runReservations.set(id, releaseRun)
+        },
+        release() {
+            releaseSession()
+            releaseRun()
+        }
+    }
+}
+
+function composeReleases(left: () => void, right: () => void) {
+    let released = false
+    return () => {
+        if (released) return
+        released = true
+        left()
+        right()
+    }
+}
+
+function isActiveState(state: string) {
+    return state === 'running' || state === 'input_required' || state === 'permission_required'
+}
+
+function isTerminalState(state: string) {
+    return state === 'completed' || state === 'failed' || state === 'canceled'
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
 function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
     assertOnlyKeys(body, [
         'protocol',
@@ -550,7 +1286,9 @@ function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
         'authType',
         'authValue',
         'authHeaderName',
-        'timeoutMs'
+        'timeoutMs',
+        'taskTimeoutMs',
+        'streamIdleTimeoutMs'
     ])
     return {
         protocol: requiredString(body.protocol, 'protocol') as AgentdProtocol,
@@ -567,7 +1305,9 @@ function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
         authType: optionalString(body.authType) as A2AAuthType | undefined,
         authValue: optionalRawString(body.authValue, 'authValue'),
         authHeaderName: optionalString(body.authHeaderName),
-        timeoutMs: optionalNumber(body.timeoutMs, 'timeoutMs')
+        timeoutMs: optionalNumber(body.timeoutMs, 'timeoutMs'),
+        taskTimeoutMs: body.taskTimeoutMs === null ? null : optionalNumber(body.taskTimeoutMs, 'taskTimeoutMs'),
+        streamIdleTimeoutMs: body.streamIdleTimeoutMs === null ? null : optionalNumber(body.streamIdleTimeoutMs, 'streamIdleTimeoutMs')
     }
 }
 
@@ -603,406 +1343,10 @@ function readApiKeyScope(value: unknown): AgentdApiKeyScope {
     }
 }
 
-function streamEvents(
-    request: IncomingMessage,
-    response: ServerResponse,
-    sessions: SessionManager,
-    sessionId: string,
-    after: string | undefined,
-    release: () => void
-) {
-    response.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no'
-    })
-    response.flushHeaders?.()
-    for (const event of sessions.eventsAfter(sessionId, after)) writeEvent(response, event)
-    const unsubscribe = sessions.subscribe(sessionId, (event) => writeEvent(response, event))
-    // Give idle SSE clients ~90 s to react before Node's default socket timeout
-    // trips. Combined with the writableEnded check inside the heartbeat this
-    // guarantees stuck keep-alive sessions eventually release their slot even
-    // if the peer never sends a FIN.
-    const idleMs = 90_000
-    request.socket.setTimeout?.(idleMs)
-    let closed = false
-    const close = () => {
-        if (closed) return
-        closed = true
-        clearInterval(heartbeat)
-        unsubscribe()
-        // Ensure both ends of the socket are actually torn down so the SSE
-        // slot returns to the pool even when the peer stops reading without
-        // closing the TCP connection cleanly.
-        try {
-            if (!response.writableEnded) response.end()
-        } catch {}
-        try {
-            request.socket.destroy()
-        } catch {}
-        release()
-    }
-    const heartbeat = setInterval(() => {
-        if (response.destroyed || response.writableEnded) {
-            close()
-            return
-        }
-        try {
-            response.write(': heartbeat\n\n')
-        } catch {
-            close()
-        }
-    }, 15_000)
-    heartbeat.unref?.()
-    request.once('close', close)
-    response.once('close', close)
-    request.socket.once('timeout', close)
-    request.socket.once('error', close)
-}
-
-function writeEvent(response: ServerResponse, event: AgentdEvent) {
-    if (response.destroyed || response.writableEnded) return
-    response.write(`id: ${event.id}\n`)
-    response.write(`event: ${event.type}\n`)
-    response.write(`data: ${JSON.stringify(event)}\n\n`)
-}
-
-function authenticateAdmin(request: IncomingMessage, sessions: AdminSessionStore) {
-    const id = cookieValue(request, ADMIN_COOKIE)
-    if (!id || !sessions.has(id)) throw new RequestError(401, 'Admin session is required')
-}
-
-function authenticateApiKey(
-    request: IncomingMessage,
-    config: AgentdConfig,
-    controlPlane: AgentdControlPlane | undefined,
-    limiter: FailureRateLimiter
-): AgentdApiKeyPrincipal {
-    const rateKey = remoteKey(request)
-    limiter.assertAllowed(rateKey)
-    const value = stringHeader(request.headers.authorization)
-    if (!value.startsWith('Bearer ')) {
-        limiter.failure(rateKey)
-        throw new RequestError(401, 'Bearer API Key is required')
-    }
-    const secret = value.slice(7)
-    const authenticate = (controlPlane as any)?.authenticateApiKey
-    const principal =
-        (typeof authenticate === 'function'
-            ? authenticate.call(controlPlane, secret)
-            : undefined) || fallbackApiKey(config, secret)
-    if (!principal) {
-        limiter.failure(rateKey)
-        throw new RequestError(401, 'Invalid API Key')
-    }
-    limiter.success(rateKey)
-    return principal
-}
-
-function fallbackApiKey(config: AgentdConfig, secret: string): AgentdApiKeyPrincipal | undefined {
-    for (const key of config.apiKeys || []) {
-        if (key.enabled && safeEqual(key.secret, secret)) {
-            return { id: key.id, scope: structuredClone(key.scope) }
-        }
-    }
-    if (config.authToken && safeEqual(config.authToken, secret)) {
-        return { id: 'legacy', scope: { allAgents: true, agentIds: [] } }
-    }
-    return undefined
-}
-
-function assertAgentScope(principal: AgentdApiKeyPrincipal, agentId: string) {
-    if (!principal.scope.allAgents && !principal.scope.agentIds.includes(agentId)) {
-        throw new RequestError(403, 'API Key is not authorized for this agent')
-    }
-}
-
-function isInitialized(config: AgentdConfig, controlPlane?: AgentdControlPlane) {
-    return controlPlane?.isInitialized() ?? config.initialized
-}
-
-function needsAdminSetup(config: AgentdConfig, controlPlane?: AgentdControlPlane) {
-    const value = (controlPlane as any)?.needsAdminSetup
-    return typeof value === 'function' ? value.call(controlPlane) : !config.adminPasswordHash
-}
-
-function assertTrustedOrigin(request: IncomingMessage, required: boolean) {
-    const origin = stringHeader(request.headers.origin)
-    if (!origin) {
-        if (required) throw new RequestError(403, 'Same-origin request is required')
-        return
-    }
-    let originHost = ''
-    try {
-        originHost = new URL(origin).host
-    } catch {
-        throw new RequestError(403, 'Request origin is invalid')
-    }
-    if (!originHost || originHost !== stringHeader(request.headers.host)) {
-        throw new RequestError(403, 'Cross-origin admin request is not allowed')
-    }
-}
-
-function assertJsonContentType(request: IncomingMessage) {
-    const contentType = stringHeader(request.headers['content-type'])
-        .split(';', 1)[0]
-        .trim()
-        .toLowerCase()
-    if (contentType !== 'application/json') {
-        throw new RequestError(415, 'Request requires application/json')
-    }
-}
-
-async function assertEmptyJsonBody(request: IncomingMessage, maxBytes: number) {
-    if (Number(request.headers['content-length'] || 0) <= 0) return
-    assertJsonContentType(request)
-    const body = await readJsonBody(request, maxBytes)
-    assertOnlyKeys(body, [])
-}
-
-async function readJsonBody(request: IncomingMessage, maxBytes: number) {
-    const declared = Number(request.headers['content-length'])
-    if (Number.isFinite(declared) && declared > maxBytes) {
-        throw new RequestError(413, 'Request body is too large')
-    }
-    const chunks: Buffer[] = []
-    let total = 0
-    for await (const value of request) {
-        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-        total += chunk.length
-        if (total > maxBytes) throw new RequestError(413, 'Request body is too large')
-        chunks.push(chunk)
-    }
-    const raw = Buffer.concat(chunks).toString('utf8')
-    if (!raw.trim()) return {} as Record<string, unknown>
-    try {
-        const parsed = JSON.parse(raw) as unknown
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new Error('body must be an object')
-        }
-        return parsed as Record<string, unknown>
-    } catch (error) {
-        throw new RequestError(400, `Invalid JSON body: ${errorMessage(error)}`)
-    }
-}
-
-async function readBytesBody(request: IncomingMessage, maxBytes: number) {
-    const declared = Number(request.headers['content-length'])
-    if (Number.isFinite(declared) && declared > maxBytes) {
-        throw new RequestError(413, 'Request body is too large')
-    }
-    const chunks: Buffer[] = []
-    let total = 0
-    for await (const value of request) {
-        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-        total += chunk.length
-        if (total > maxBytes) throw new RequestError(413, 'Request body is too large')
-        chunks.push(chunk)
-    }
-    return Buffer.concat(chunks)
-}
-
-function assertOnlyKeys(body: Record<string, unknown>, allowed: string[]) {
-    const accepted = new Set(allowed)
-    const unknown = Object.keys(body).filter((key) => !accepted.has(key))
-    if (unknown.length) {
-        throw new RequestError(400, `Unsupported request fields: ${unknown.join(', ')}`)
-    }
-}
-
-function requiredString(value: unknown, name: string) {
-    const text = typeof value === 'string' ? value.trim() : ''
-    if (!text) throw new RequestError(400, `${name} is required`)
-    return text
-}
-
-function requiredRawString(value: unknown, name: string) {
-    if (typeof value !== 'string' || !value) throw new RequestError(400, `${name} is required`)
-    return value
-}
-
-function requiredMessage(value: unknown) {
-    if (typeof value !== 'string' || !value.trim()) {
-        throw new RequestError(400, 'message is required')
-    }
-    return value
-}
-
-function requiredInteger(value: unknown, name: string) {
-    if (typeof value !== 'number' || !Number.isInteger(value)) {
-        throw new RequestError(400, `${name} must be an integer`)
-    }
-    return value
-}
-
-function optionalAttachmentIds(value: unknown) {
-    if (value === undefined) return []
-    if (!Array.isArray(value) || value.length > 16) {
-        throw new RequestError(400, 'attachments must be an array with at most 16 ids')
-    }
-    return value.map((item) => requiredString(item, 'attachments'))
-}
-
-function normalizePublishPaths(body: Record<string, unknown>): string[] {
-    const bodyPaths = body.paths
-    if (bodyPaths !== undefined) {
-        if (!Array.isArray(bodyPaths) || bodyPaths.length === 0) {
-            throw new RequestError(400, 'paths must be a non-empty array of strings')
-        }
-        if (bodyPaths.length > 32) {
-            throw new RequestError(400, 'paths accepts at most 32 entries')
-        }
-        return bodyPaths.map((item) => requiredString(item, 'paths'))
-    }
-    return [requiredString(body.path, 'path')]
-}
-
-function normalizedMediaType(value: string | string[] | undefined) {
-    const mediaType = stringHeader(value).split(';', 1)[0].trim().toLowerCase()
-    return mediaType || undefined
-}
-
-function decodeHeader(value: string | string[] | undefined) {
-    const raw = stringHeader(value)
-    if (!raw) return ''
-    try {
-        return decodeURIComponent(raw)
-    } catch {
-        return raw
-    }
-}
-
-function cleanQuery(value: string | null) {
-    const text = String(value || '').trim()
-    return text || undefined
-}
-
-function boundedLimit(value: string | null) {
-    if (!value) return undefined
-    const number = Number(value)
-    if (!Number.isInteger(number) || number < 1 || number > 200) {
-        throw new RequestError(400, 'limit must be an integer between 1 and 200')
-    }
-    return number
-}
-
-function optionalRunState(value: string | null) {
-    if (!value) return undefined
-    const states = new Set([
-        'created',
-        'running',
-        'input_required',
-        'permission_required',
-        'completed',
-        'failed',
-        'canceled'
-    ])
-    if (!states.has(value)) throw new RequestError(400, 'Invalid run state')
-    return value as import('./types.js').AgentdSessionState
-}
-
-function optionalRawString(value: unknown, name: string) {
-    if (value === undefined || value === null || value === '') return undefined
-    if (typeof value !== 'string') throw new RequestError(400, `${name} must be a string`)
-    return value
-}
-
-function optionalString(value: unknown) {
-    if (value === undefined || value === null) return undefined
-    if (typeof value !== 'string') throw new RequestError(400, 'Expected a string')
-    return value.trim() || undefined
-}
-
-function optionalPendingAction(
-    value: unknown
-): AgentdPendingResponse['action'] | undefined {
-    if (value === undefined || value === null || value === '') return undefined
-    if (value === 'accept' || value === 'decline' || value === 'cancel') {
-        return value
-    }
-    throw new RequestError(
-        400,
-        'action must be accept, decline, or cancel'
-    )
-}
-
-function optionalBoolean(value: unknown, name: string) {
-    if (value === undefined) return undefined
-    if (typeof value !== 'boolean') throw new RequestError(400, `${name} must be boolean`)
-    return value
-}
-
-function optionalNumber(value: unknown, name: string) {
-    if (value === undefined) return undefined
-    if (typeof value !== 'number' || !Number.isInteger(value)) {
-        throw new RequestError(400, `${name} must be an integer`)
-    }
-    return value
-}
-
-function requiredStringArray(value: unknown, name: string, allowEmpty = false) {
-    if (!Array.isArray(value)) throw new RequestError(400, `${name} must be an array of strings`)
-    const result = value.map((item) => {
-        if (typeof item !== 'string' || !item.trim()) {
-            throw new RequestError(400, `${name} must contain non-empty strings`)
-        }
-        return item.trim()
-    })
-    if (!allowEmpty && !result.length) {
-        throw new RequestError(400, `${name} must contain at least one value`)
-    }
-    return result
-}
-
-function cookieValue(request: IncomingMessage, name: string) {
-    const cookie = stringHeader(request.headers.cookie)
-    for (const part of cookie.split(';')) {
-        const index = part.indexOf('=')
-        if (index < 0 || part.slice(0, index).trim() !== name) continue
-        return part.slice(index + 1).trim()
-    }
-    return ''
-}
-
-function adminCookie(value: string, ttlMs: number, config: AgentdConfig) {
-    return [
-        `${ADMIN_COOKIE}=${value}`,
-        'Path=/',
-        'HttpOnly',
-        'SameSite=Strict',
-        `Max-Age=${Math.floor(ttlMs / 1000)}`,
-        ...(config.secureAdminCookies ? ['Secure'] : [])
-    ].join('; ')
-}
-
-function clearAdminCookie(config: AgentdConfig) {
-    return [
-        `${ADMIN_COOKIE}=`,
-        'Path=/',
-        'HttpOnly',
-        'SameSite=Strict',
-        'Max-Age=0',
-        ...(config.secureAdminCookies ? ['Secure'] : [])
-    ].join('; ')
-}
-
-function isMutating(method?: string) {
-    return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
-}
-
-function remoteKey(request: IncomingMessage) {
-    return request.socket.remoteAddress || 'unknown'
-}
-
-function stringHeader(value: string | string[] | undefined) {
-    return Array.isArray(value) ? value[0] || '' : value || ''
-}
-
-function safeEqual(left: string, right: string) {
-    const a = Buffer.from(left)
-    const b = Buffer.from(right)
-    return a.length === b.length && timingSafeEqual(a, b)
+function boundedOffset(value: string | null) {
+    if (value === null) return 0
+    if (!/^\d{1,9}$/.test(value)) throw new RequestError(400, 'offset must be a non-negative integer')
+    return Number(value)
 }
 
 function safePath(value?: string) {
@@ -1019,6 +1363,7 @@ function errorStatus(error: unknown) {
     if (error instanceof SessionRequestError) return error.status
     if (error instanceof ControlPlaneError) return error.status
     if (error instanceof RequestError) return error.status
+    if (error instanceof QuotaExceededError || error instanceof DiagnosticConcurrencyError) return 429
     return 500
 }
 
@@ -1037,13 +1382,31 @@ function writeJson(response: ServerResponse, status: number, value: unknown) {
     response.end(body)
 }
 
-class RequestError extends Error {
-    constructor(
-        readonly status: number,
-        message: string
-    ) {
-        super(message)
+function writeError(response: ServerResponse, status: number, error: unknown, requestId: string) {
+    if (error instanceof QuotaExceededError) {
+        writeJson(response, status, {
+            error: 'Quota exceeded',
+            quota: error.quota,
+            limit: error.limit,
+            current: error.current,
+            retryAfterMs: error.retryAfterMs,
+            requestId
+        })
+        return
     }
+    if (error instanceof DiagnosticConcurrencyError) {
+        writeJson(response, status, {
+            error: 'Diagnostic capacity has been reached',
+            quota: 'diagnostics',
+            retryAfterMs: error.retryAfterMs,
+            requestId
+        })
+        return
+    }
+    writeJson(response, status, {
+        error: status >= 500 ? 'Internal server error' : errorMessage(error),
+        requestId
+    })
 }
 
 class FailureRateLimiter {
@@ -1067,6 +1430,13 @@ class FailureRateLimiter {
 
     failure(key: string) {
         const now = Date.now()
+        // Bound untrusted remote-address cardinality and evict expired failures.
+        for (const [id, item] of this.entries) {
+            if (item.blockedUntil <= now && now - item.windowStartedAt >= this.windowMs) this.entries.delete(id)
+        }
+        if (!this.entries.has(key) && this.entries.size >= 4096) {
+            throw new RequestError(429, 'Too many authentication attempts')
+        }
         const previous = this.entries.get(key)
         const entry =
             !previous || now - previous.windowStartedAt >= this.windowMs

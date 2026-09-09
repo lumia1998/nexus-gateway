@@ -8,29 +8,34 @@ export async function terminateProcessTree(
     options: { ownsProcessGroup?: boolean; graceMs?: number } = {}
 ) {
     const pid = child.pid
-    if (!pid || hasExited(child)) return
+    if (!pid) return
     const graceMs = Math.max(0, options.graceMs ?? DEFAULT_GRACE_MS)
 
     if (process.platform === 'win32') {
+        // Once a Windows process has exited taskkill can no longer address its
+        // descendants by the parent's PID. Callers should tear down before
+        // exit when they need Windows tree semantics.
+        if (hasExited(child)) return
         await taskkill(pid, false)
         if (await waitForExit(child, graceMs)) return
         await taskkill(pid, true)
-        await waitForExit(child, FORCE_KILL_WAIT_MS)
-        return
+        if (await waitForExit(child, FORCE_KILL_WAIT_MS)) return
+        throw new Error(`Failed to terminate process ${pid}`)
     }
 
     if (options.ownsProcessGroup === true) {
         signalUnixGroup(pid, 'SIGTERM')
         if (await waitForUnixGroupExit(pid, graceMs)) return
         signalUnixGroup(pid, 'SIGKILL')
-        await waitForUnixGroupExit(pid, FORCE_KILL_WAIT_MS)
-        return
+        if (await waitForUnixGroupExit(pid, FORCE_KILL_WAIT_MS)) return
+        throw new Error(`Failed to terminate process group ${pid}`)
     }
 
     signalUnix(child, 'SIGTERM')
     if (await waitForExit(child, graceMs)) return
     signalUnix(child, 'SIGKILL')
-    await waitForExit(child, FORCE_KILL_WAIT_MS)
+    if (await waitForExit(child, FORCE_KILL_WAIT_MS)) return
+    throw new Error(`Failed to terminate process ${pid}`)
 }
 
 function signalUnix(child: ChildProcess, signal: NodeJS.Signals) {

@@ -5,6 +5,7 @@ import { createHermesDriver } from './hermes.js'
 import { createOpenCodeDriver } from './opencode.js'
 import { createOpenClawDriver } from './openclaw.js'
 import { createPiDriver } from './pi.js'
+import { createStdioAcpDriver } from './stdio.js'
 import type { AgentDriver } from './types.js'
 
 export function createDriverRegistry(config: AgentdConfig) {
@@ -13,6 +14,16 @@ export function createDriverRegistry(config: AgentdConfig) {
         if (driver.protocol === 'a2a') continue
         if (driver.enabled === false) continue
         switch (driver.driver) {
+            case 'stdio':
+                if (!driver.command) break
+                drivers.set(id, createStdioAcpDriver(id, driver, {
+                    name: driver.name || id,
+                    description: driver.description || 'Custom ACP agent over stdio',
+                    command: driver.command,
+                    args: driver.args || [],
+                    probeArgs: driver.probeArgs
+                }))
+                break
             case 'opencode':
                 drivers.set(id, createOpenCodeDriver(id, driver))
                 break

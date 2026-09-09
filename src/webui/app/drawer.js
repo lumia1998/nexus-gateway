@@ -1,5 +1,7 @@
 import { byId, drawer, drawerBackdrop, drawerForm, drawerFooter, keyActionMenu, escapeHtml } from './dom.js'
 import { runAction } from './toast.js'
+import { state } from './state.js'
+import { writeLocationState } from './location-state.js'
 
 let drawerSubmit = null
 let drawerVersion = 0
@@ -49,6 +51,7 @@ document.addEventListener('focusin', (event) => {
 })
 
 export function openDrawer(title, body, submitLabel, onSubmit, danger) {
+  if (state.selectedRunId) { state.selectedRunId = undefined; writeLocationState(state) }
   const version = ++drawerVersion
   if (drawer.classList.contains('hidden')) {
     const active = document.activeElement
@@ -81,6 +84,7 @@ export function openDrawer(title, body, submitLabel, onSubmit, danger) {
 
 export function closeDrawer() {
   if (drawer.classList.contains('hidden')) return
+  if (state.selectedRunId) { state.selectedRunId = undefined; writeLocationState(state) }
   drawerVersion++
   drawer.classList.add('hidden')
   drawerBackdrop.classList.add('hidden')

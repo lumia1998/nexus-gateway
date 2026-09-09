@@ -78,12 +78,28 @@ export class A2AClientRuntime implements AgentSessionRuntime {
     private sawTaskStatus = false
     private sawAgentMessage = false
     private completionProof?: AgentdTurnCompletionProof
+    private readonly taskTimeoutMs: number
+    private readonly streamIdleTimeoutMs: number
+    private taskDeadlineAt?: number
 
     constructor(
         private readonly config: AgentdA2AConfig,
         private readonly sink: AgentSessionSink,
         private readonly promptTimeoutMs: number
-    ) {}
+    ) {
+        // Keep inheritance at runtime so changing the gateway-wide prompt
+        // timeout continues to affect agents that did not opt into a local
+        // task deadline. The per-request timeout is deliberately excluded
+        // from this calculation: it only bounds connection/headers.
+        this.taskTimeoutMs = positiveTimeout(
+            config.taskTimeoutMs ?? promptTimeoutMs,
+            promptTimeoutMs
+        )
+        this.streamIdleTimeoutMs = positiveTimeout(
+            config.streamIdleTimeoutMs ?? config.timeoutMs,
+            config.timeoutMs || 60_000
+        )
+    }
 
     async start() {
         if (this.disposed) throw new Error('A2A runtime is disposed')
@@ -104,7 +120,11 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.sink.setState('created')
     }
 
-    async prompt(message: string, attachments: AgentdInputAttachment[] = []) {
+    async prompt(
+        message: string,
+        attachments: AgentdInputAttachment[] = [],
+        continuation = false
+    ) {
         if (!this.client || !this.card) throw new Error('A2A runtime is not connected')
         if (this.prompting) throw new Error('A2A session is already processing a message')
         if (this.disposed) throw new Error('A2A runtime is disposed')
@@ -116,11 +136,16 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.completionProof = undefined
         this.sink.clearPending()
         this.sink.setState('running')
+        const taskDeadlineAt = continuation && this.taskDeadlineAt !== undefined
+            ? this.taskDeadlineAt
+            : Date.now() + this.taskTimeoutMs
+        this.taskDeadlineAt = taskDeadlineAt
         const controller = new AbortController()
         this.activeController = controller
+        const remainingTaskMs = Math.max(1, taskDeadlineAt - Date.now())
         const timer = setTimeout(
-            () => controller.abort(new Error('A2A message timed out')),
-            Math.min(this.promptTimeoutMs, this.config.timeoutMs || this.promptTimeoutMs)
+            () => controller.abort(new A2ATaskTimeoutError(this.taskTimeoutMs)),
+            remainingTaskMs
         )
         timer.unref?.()
         try {
@@ -159,6 +184,9 @@ export class A2AClientRuntime implements AgentSessionRuntime {
             clearTimeout(timer)
             if (this.activeController === controller) this.activeController = undefined
             this.prompting = false
+            if (this.sink.state !== 'input_required' && !this.queuedResponse) {
+                this.taskDeadlineAt = undefined
+            }
             finish()
             this.promptFinished = undefined
         }
@@ -187,14 +215,20 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.sink.setState('running')
         void previous.then(async () => {
             this.queuedResponse = false
-            if (this.disposed || this.sink.state === 'canceled') return
-            await this.prompt(message, attachments)
+            if (
+                this.disposed ||
+                this.sink.state === 'canceled' ||
+                this.sink.state === 'failed' ||
+                (this.taskDeadlineAt !== undefined && this.taskDeadlineAt <= Date.now())
+            ) return
+            await this.prompt(message, attachments, true)
         }).catch((error) => {
             if (!this.disposed && this.sink.state !== 'canceled') this.sink.setState('failed', errorMessage(error))
         })
     }
 
     async cancel() {
+        this.taskDeadlineAt = undefined
         this.sink.clearPending()
         this.sink.setState('canceled')
         this.activeController?.abort(new Error('A2A session canceled'))
@@ -217,6 +251,7 @@ export class A2AClientRuntime implements AgentSessionRuntime {
 
     async dispose() {
         this.disposed = true
+        this.taskDeadlineAt = undefined
         this.activeController?.abort(new Error('A2A runtime disposed'))
         this.activeController = undefined
     }
@@ -478,13 +513,198 @@ function authenticatedFetch(config: AgentdA2AConfig): typeof fetch {
         ) {
             headers.set(config.auth.headerName, config.auth.value)
         }
-        return fetch(input, {
-            ...init,
-            headers,
-            redirect: 'error',
-            signal: init.signal || AbortSignal.timeout(config.timeoutMs || 60_000)
-        })
+        const timeoutMs = config.timeoutMs || 60_000
+        const timeoutController = new AbortController()
+        const signals = [timeoutController.signal]
+        if (init.signal) signals.push(init.signal)
+        const signal = AbortSignal.any(signals)
+        const requestTimeout = new A2ARequestTimeoutError(timeoutMs)
+        let bodyAbort: (() => void) | undefined
+        const timer = setTimeout(() => {
+            timeoutController.abort(requestTimeout)
+            bodyAbort?.()
+        }, timeoutMs)
+        timer.unref?.()
+        try {
+            const response = await fetch(input, {
+                ...init,
+                headers,
+                redirect: 'error',
+                signal
+            })
+            // Only an SSE response is an intentionally long-lived request.
+            // Card and ordinary JSON calls retain timeoutMs through the body;
+            // otherwise a slow/trickling Card could evade the request bound.
+            if (isEventStream(response)) {
+                clearTimeout(timer)
+                return withStreamIdleTimeout(response, config.streamIdleTimeoutMs || timeoutMs)
+            }
+            if (!response.body) {
+                clearTimeout(timer)
+                return response
+            }
+            const deadline = responseDeadlineBody(
+                response.body,
+                requestTimeout,
+                () => clearTimeout(timer)
+            )
+            bodyAbort = deadline.abort
+            return new Response(deadline.stream, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers
+            })
+        } catch (error) {
+            clearTimeout(timer)
+            if (timeoutController.signal.aborted && !init.signal?.aborted) {
+                throw requestTimeout
+            }
+            throw error
+        }
     }
+}
+
+class A2ARequestTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`A2A request timed out after ${timeoutMs}ms`)
+        this.name = 'A2ARequestTimeoutError'
+    }
+}
+
+class A2ATaskTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`A2A task timed out after ${timeoutMs}ms`)
+        this.name = 'A2ATaskTimeoutError'
+    }
+}
+
+class A2AStreamIdleTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`A2A stream made no progress for ${timeoutMs}ms`)
+        this.name = 'A2AStreamIdleTimeoutError'
+    }
+}
+
+function withStreamIdleTimeout(response: Response, timeoutMs: number) {
+    if (!response.body || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return response
+    const body = idleTimeoutBody(response.body, timeoutMs)
+    return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+    })
+}
+
+function isEventStream(response: Response) {
+    return response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ===
+        'text/event-stream'
+}
+
+function responseDeadlineBody(
+    body: ReadableStream<Uint8Array>,
+    timeoutError: Error,
+    cleanup: () => void
+) {
+    const reader = body.getReader()
+    let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+    let closed = false
+    let timedOut = false
+    const abort = () => {
+        if (closed || timedOut) return
+        timedOut = true
+        void reader.cancel(timeoutError).catch(() => undefined)
+        controllerRef?.error(timeoutError)
+    }
+    const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+            controllerRef = controller
+        },
+        async pull(controller) {
+            if (closed || timedOut) return
+            try {
+                const result = await reader.read()
+                if (timedOut) return
+                if (result.done) {
+                    closed = true
+                    cleanup()
+                    controller.close()
+                    return
+                }
+                controller.enqueue(result.value)
+            } catch (error) {
+                if (timedOut) return
+                closed = true
+                cleanup()
+                controller.error(error)
+            }
+        },
+        async cancel(reason) {
+            closed = true
+            cleanup()
+            await reader.cancel(reason)
+        }
+    })
+    return { stream, abort }
+}
+
+function idleTimeoutBody(body: ReadableStream<Uint8Array>, timeoutMs: number) {
+    const reader = body.getReader()
+    let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+    let timer: NodeJS.Timeout | undefined
+    let closed = false
+    let timedOut = false
+
+    const clearIdleTimer = () => {
+        if (timer) clearTimeout(timer)
+        timer = undefined
+    }
+    const armIdleTimer = () => {
+        clearIdleTimer()
+        timer = setTimeout(() => {
+            if (closed || timedOut) return
+            timedOut = true
+            const error = new A2AStreamIdleTimeoutError(timeoutMs)
+            void reader.cancel(error).catch(() => undefined)
+            controllerRef?.error(error)
+        }, timeoutMs)
+        timer.unref?.()
+    }
+
+    return new ReadableStream<Uint8Array>({
+        start(controller) {
+            controllerRef = controller
+            armIdleTimer()
+        },
+        async pull(controller) {
+            if (closed || timedOut) return
+            try {
+                const result = await reader.read()
+                if (timedOut) return
+                if (result.done) {
+                    closed = true
+                    clearIdleTimer()
+                    controller.close()
+                    return
+                }
+                armIdleTimer()
+                controller.enqueue(result.value)
+            } catch (error) {
+                if (timedOut) return
+                closed = true
+                clearIdleTimer()
+                controller.error(error)
+            }
+        },
+        async cancel(reason) {
+            closed = true
+            clearIdleTimer()
+            await reader.cancel(reason)
+        }
+    })
+}
+
+function positiveTimeout(value: number | undefined, fallback: number) {
+    return Number.isFinite(value) && (value as number) > 0 ? Math.trunc(value as number) : fallback
 }
 
 function artifactFromA2A(artifact: Artifact): AgentdArtifact {

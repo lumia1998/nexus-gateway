@@ -1,0 +1,26 @@
+[Unit]
+Description=Nexus Gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+WorkingDirectory=/opt/nexus-gateway/current
+ExecStart=/usr/bin/node /opt/nexus-gateway/current/dist/cli.js --config /var/lib/nexus-agentd/nexus-agentd.json
+Restart=on-failure
+RestartSec=5s
+EnvironmentFile=-/etc/nexus-agentd/nexus-agentd.env
+StateDirectory=nexus-agentd
+LogsDirectory=nexus-agentd
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/nexus-agentd /var/log/nexus-agentd
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

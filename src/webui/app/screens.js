@@ -2,8 +2,9 @@ import { state } from './state.js'
 import { setupScreen, loginScreen, appRoot, byId } from './dom.js'
 import { api } from './api.js'
 import { toast } from './toast.js'
-import { loadAll } from './data.js'
-import { render } from './render.js'
+import { loadAll, resetData } from './data.js'
+import { render, resetView, openRunDrawer } from './render.js'
+import { readLocationState } from './location-state.js'
 import { applyTheme } from './theme.js'
 import { closeDrawer } from './drawer.js'
 
@@ -17,7 +18,10 @@ function showOnly(element) {
 
 export function showLogin() {
   state.authenticated = false
+  state.authEpoch++
   closeDrawer()
+  resetData()
+  resetView()
   showOnly(loginScreen)
   byId('login-form').reset()
   byId('login-password').focus()
@@ -29,7 +33,7 @@ export async function boot() {
     const bootstrap = await api('/v1/bootstrap/status')
     if (bootstrap.adminSetupRequired) {
       showOnly(setupScreen)
-      byId('setup-password').focus()
+      byId('setup-token').focus()
       return
     }
     const auth = await api('/v1/admin/auth/status')
@@ -45,14 +49,20 @@ export async function boot() {
 }
 
 export async function enterApp() {
-  showOnly(byId('boot-screen'))
-  try {
-    await loadAll()
-    state.authenticated = true
-    showOnly(appRoot)
-    render()
-  } catch (error) {
-    showLogin()
-    throw error
-  }
+  const epoch = state.authEpoch
+  // Authentication is the gate for the shell. Agent probes and history reads
+  // are deliberately started after the shell is visible so a slow/unreachable
+  // remote agent cannot send an administrator back to the login screen.
+  state.authenticated = true
+  Object.assign(state, readLocationState())
+  showOnly(appRoot)
+  render()
+  if (state.selectedRunId) void openRunDrawer(state.selectedRunId)
+  if (epoch !== state.authEpoch) return
+  void loadAll().catch((error) => {
+    // Individual resources already keep their last good value and expose a
+    // retry affordance. This catch is only a guard for an unexpected loader
+    // failure and must not turn a valid admin session into a login prompt.
+    if (epoch === state.authEpoch) toast(error.message, true)
+  })
 }

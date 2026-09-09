@@ -6,6 +6,7 @@ export const markup = String.raw`
   <form id="setup-form" class="auth-card">
     <header><span class="brand-mark">N</span><h1>初始化 Agent Nexus</h1></header>
     <p>此密码仅用于登录控制台；客户端 API 密钥在登录后单独创建。</p>
+    <div class="field"><label for="setup-token">初始化令牌</label><input id="setup-token" name="setupToken" type="password" autocomplete="off" required><small class="field-help">从网关启动终端复制 Setup token。重启后令牌会更新；远程初始化请使用可信网络或 HTTPS。</small></div>
     <div class="field"><label for="setup-password">控制台密码</label><input id="setup-password" name="password" type="password" minlength="12" autocomplete="new-password" required></div>
     <div class="field"><label for="setup-confirm">确认密码</label><input id="setup-confirm" name="confirmPassword" type="password" minlength="12" autocomplete="new-password" required></div>
     <button class="button primary auth-submit" type="submit">完成初始化</button>
@@ -49,6 +50,7 @@ export const markup = String.raw`
       <div id="page-actions" class="page-actions"></div>
     </header>
     <section id="page-content" class="page-content">
+      <p id="connection-status" class="connection-status hidden" role="status"></p>
       <div id="page-stats"></div>
       <div id="page-toolbar"></div>
       <div id="page-results"></div>

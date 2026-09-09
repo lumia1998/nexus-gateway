@@ -32,7 +32,7 @@ export async function ensureAgentdConfig(
 
     const initial = {
         listen: {
-            host: options.host?.trim() || '127.0.0.1',
+            host: options.host?.trim() || '0.0.0.0',
             port: bootstrapNumber(options.port, 8787, 1, 65535)
         },
         initialized: false,
@@ -75,7 +75,7 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
     if (!isRecord(value)) throw new Error('nexus-agentd config root must be an object')
 
     const listen = optionalRecord(value.listen, 'listen') || {}
-    const host = optionalString(listen.host, 'listen.host') || '127.0.0.1'
+    const host = optionalString(listen.host, 'listen.host') || '0.0.0.0'
     const port = integerValue(listen.port, 'listen.port', 8787, 1, 65535)
     const initialized = optionalBoolean(value.initialized, 'initialized') ?? true
     const rawAuthToken = optionalString(value.authToken, 'authToken')
@@ -112,18 +112,45 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
         throw new Error('nexus-agentd workspaceRoots must contain at least one path')
     }
     const rawAgents = requiredRecord(value.agents, 'agents')
-    const agents: Record<string, AgentdAgentConfig> = {}
+    const agents: Record<string, AgentdAgentConfig> = Object.create(null)
     for (const [id, input] of Object.entries(rawAgents)) {
         agents[id] = parseAgent(id, input)
     }
+    const quotas = optionalRecord(value.quotas, 'quotas') || {}
+    const history = optionalRecord(value.history, 'history') || {}
+    const artifacts = optionalRecord(value.artifacts, 'artifacts') || {}
+    const maxSessions = integerValue(value.maxSessions, 'maxSessions', 64, 1, 10_000)
+    const maxSseConnections = integerValue(value.maxSseConnections, 'maxSseConnections', 128, 1, 10_000)
 
     return {
         listen: { host, port },
+        publicOrigins: value.publicOrigins === undefined ? [] : stringArray(value.publicOrigins, 'publicOrigins').map((origin) => {
+            validateHttpUrl(origin, 'publicOrigins')
+            if (new URL(origin).origin !== origin) throw new Error('publicOrigins must contain exact origins without paths')
+            return origin
+        }),
         initialized,
         authToken,
         adminPasswordHash,
         apiKeys,
         workspaceRoots,
+        quotas: {
+            maxSessionsPerKey: integerValue(quotas.maxSessionsPerKey, 'quotas.maxSessionsPerKey', Math.min(16, maxSessions), 1, 10_000),
+            maxRunningRunsPerKey: integerValue(quotas.maxRunningRunsPerKey, 'quotas.maxRunningRunsPerKey', Math.min(4, maxSessions), 1, 10_000),
+            maxSsePerKey: integerValue(quotas.maxSsePerKey, 'quotas.maxSsePerKey', Math.min(8, maxSseConnections), 1, 10_000),
+            maxUploadBytesPerKey: integerValue(quotas.maxUploadBytesPerKey, 'quotas.maxUploadBytesPerKey', 32 * 1024 * 1024, 1024, 1024 * 1024 * 1024)
+        },
+        history: {
+            maxRuns: integerValue(history.maxRuns, 'history.maxRuns', 1000, 1, 100_000),
+            retentionDays: integerValue(history.retentionDays, 'history.retentionDays', 30, 1, 3650),
+            maxBytes: integerValue(history.maxBytes, 'history.maxBytes', 64 * 1024 * 1024, 1024, 1024 * 1024 * 1024)
+        },
+        artifacts: {
+            retentionDays: integerValue(artifacts.retentionDays, 'artifacts.retentionDays', 30, 1, 3650),
+            maxBytes: integerValue(artifacts.maxBytes, 'artifacts.maxBytes', 512 * 1024 * 1024, 1024, 1024 ** 4),
+            maxArtifactBytes: integerValue(artifacts.maxArtifactBytes, 'artifacts.maxArtifactBytes', 12 * 1024 * 1024, 1024, 12 * 1024 * 1024),
+            maxQueuedBytes: integerValue(artifacts.maxQueuedBytes, 'artifacts.maxQueuedBytes', 64 * 1024 * 1024, 1024, 512 * 1024 * 1024)
+        },
         maxRequestBytes: integerValue(
             value.maxRequestBytes,
             'maxRequestBytes',
@@ -180,7 +207,7 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
             10_000,
             24 * 60 * 60 * 1000
         ),
-        maxSessions: integerValue(value.maxSessions, 'maxSessions', 64, 1, 10_000),
+        maxSessions,
         maxSseConnections: integerValue(
             value.maxSseConnections,
             'maxSseConnections',
@@ -248,6 +275,10 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
             input.args === undefined
                 ? undefined
                 : stringArray(input.args, `agents.${id}.args`),
+        probeArgs:
+            input.probeArgs === undefined
+                ? undefined
+                : stringArray(input.probeArgs, `agents.${id}.probeArgs`),
         inheritEnv:
             input.inheritEnv === undefined
                 ? undefined
@@ -261,6 +292,9 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
             1000,
             24 * 60 * 60 * 1000
         )
+    }
+    if (driver === 'stdio' && !result.command) {
+        throw new Error(`nexus-agentd agents.${id}.command is required for the stdio driver`)
     }
     return result
 }
@@ -320,7 +354,27 @@ function parseA2AAgent(id: string, input: Record<string, unknown>): AgentdA2ACon
             60_000,
             1_000,
             30 * 60_000
-        )
+        ),
+        taskTimeoutMs:
+            input.taskTimeoutMs === undefined
+                ? undefined
+                : integerValue(
+                      input.taskTimeoutMs,
+                      `agents.${id}.taskTimeoutMs`,
+                      30 * 60_000,
+                      10_000,
+                      24 * 60 * 60 * 1000
+                  ),
+        streamIdleTimeoutMs:
+            input.streamIdleTimeoutMs === undefined
+                ? undefined
+                : integerValue(
+                      input.streamIdleTimeoutMs,
+                      `agents.${id}.streamIdleTimeoutMs`,
+                      60_000,
+                      1_000,
+                      30 * 60_000
+                  )
     }
 }
 

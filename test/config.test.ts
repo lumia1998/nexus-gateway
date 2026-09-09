@@ -5,12 +5,11 @@ import path from 'node:path'
 import test from 'node:test'
 import { ensureAgentdConfig, loadAgentdConfig } from '../src/config.js'
 
-test('first run creates a pending config and preserves an explicit 0.0.0.0 listener', async () => {
+test('first run defaults to all interfaces and preserves existing config', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-config-'))
     const configPath = path.join(directory, 'nexus-agentd.json')
     try {
         const result = await ensureAgentdConfig(configPath, {
-            host: '0.0.0.0',
             port: 9876,
             workspace: directory
         })
@@ -101,7 +100,9 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
                     agentCardUrl: 'http://192.168.1.20:8080/custom/card.json',
                     preferredTransport: 'http-json',
                     auth: { type: 'bearer', value: `env:${secretName}` },
-                    timeoutMs: 45_000
+                    timeoutMs: 45_000,
+                    taskTimeoutMs: 90_000,
+                    streamIdleTimeoutMs: 12_000
                 }
             }
         }
@@ -118,6 +119,8 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
             assert.equal(config.agents.remote.preferredTransport, 'http-json')
             assert.equal(config.agents.remote.auth?.value, 'remote-secret')
             assert.equal(config.agents.remote.timeoutMs, 45_000)
+            assert.equal(config.agents.remote.taskTimeoutMs, 90_000)
+            assert.equal(config.agents.remote.streamIdleTimeoutMs, 12_000)
         }
 
         await writeFile(configPath, JSON.stringify({ ...base, maxSessions: '64' }))
@@ -148,7 +151,33 @@ test('config parses ACP and A2A independently and rejects malformed typed fields
         if (legacy.agents.remote.protocol === 'a2a') {
             assert.equal(legacy.agents.remote.agentUrl, 'http://192.168.1.20:8080')
             assert.equal(legacy.agents.remote.preferredTransport, 'auto')
+            assert.equal(legacy.agents.remote.taskTimeoutMs, undefined)
+            assert.equal(legacy.agents.remote.streamIdleTimeoutMs, undefined)
         }
+
+        await writeFile(
+            configPath,
+            JSON.stringify({
+                ...base,
+                agents: {
+                    custom: { protocol: 'acp', driver: 'stdio', command: 'custom-agent', probeArgs: ['--health'] }
+                }
+            })
+        )
+        const custom = await loadAgentdConfig(configPath)
+        if (custom.agents.custom.protocol === 'acp') {
+            assert.equal(custom.agents.custom.driver, 'stdio')
+            assert.deepEqual(custom.agents.custom.probeArgs, ['--health'])
+        }
+
+        await writeFile(
+            configPath,
+            JSON.stringify({
+                ...base,
+                agents: { custom: { protocol: 'acp', driver: 'stdio' } }
+            })
+        )
+        await assert.rejects(() => loadAgentdConfig(configPath), /command is required.*stdio/)
     } finally {
         if (previous === undefined) delete process.env[secretName]
         else process.env[secretName] = previous

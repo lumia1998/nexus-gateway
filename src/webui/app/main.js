@@ -4,12 +4,15 @@ import { api } from './api.js'
 import { toast, runAction, withBusy } from './toast.js'
 import { boot, enterApp, showLogin } from './screens.js'
 import { applyTheme } from './theme.js'
-import { loadAll, refreshRuns, refreshReadiness } from './data.js'
+import { readLocationState, writeLocationState } from './location-state.js'
+import { loadAll, refreshRuns, refreshReadiness, markResourceSaved, retryResource } from './data.js'
 import { closeDrawer, getDrawerSubmit, getDrawerVersion, openConfirmDrawer, handleDrawerKeydown } from './drawer.js'
 import {
   render,
   openRunDrawer,
+  refreshOpenRunDrawer,
   openAgentDrawer,
+  openAgentDiagnostics,
   openWorkspaceDrawer,
   workspaceDependents,
   openKeyDrawer,
@@ -17,7 +20,7 @@ import {
   openRenameKeyDrawer,
   showSecret,
   copySecret,
-  reloadKeys,
+  applyApiKey,
   toggleKeyActionMenu,
   handleKeyMenuKeydown,
   closeKeyActionMenu
@@ -31,18 +34,20 @@ function handleKeyAction(action, id) {
     return
   }
   if (action === 'regenerate') {
-    openConfirmDrawer('重新生成 API 密钥', '当前密钥会立即失效，使用它的客户端必须改用新密钥。', '重新生成', async (isCurrent) => {
+    openConfirmDrawer('重新生成 API 密钥', '旧密钥会立即拒绝新请求，并关闭使用它的现有 SSE 连接；正在执行的任务会继续。原密钥 ID 和会话归属保留，客户端需改用新密钥。', '重新生成', async (isCurrent) => {
       const value = await api('/v1/admin/api-keys/' + encodeURIComponent(id) + '/regenerate', { method: 'POST' })
-      await reloadKeys()
+      applyApiKey(value.key)
       if (isCurrent()) showSecret('API 密钥已重新生成', value.secret)
       else toast('API 密钥已重新生成，可在密钥列表中显示或复制')
     })
     return
   }
   if (action === 'delete') {
-    openConfirmDrawer('删除 API 密钥', '使用该密钥的客户端会立即失去访问权限，此操作无法撤销。', '删除密钥', async () => {
+    openConfirmDrawer('删除 API 密钥', '会立即拒绝使用该密钥的新请求，并关闭使用它的现有 SSE 连接；正在执行的任务会继续。删除后，原密钥 ID 的已有会话无法再访问。此操作无法撤销。', '删除密钥', async () => {
       await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'DELETE' })
-      await reloadKeys()
+      state.apiKeys = state.apiKeys.filter((item) => item.id !== id)
+      markResourceSaved('apiKeys')
+      render()
       toast('API 密钥已删除')
     })
     return
@@ -59,9 +64,14 @@ function handleKeyAction(action, id) {
     }
     if (action === 'scope') openKeyScopeDrawer(key)
     if (action === 'toggle') {
-      await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled: !key.enabled } })
-      await reloadKeys()
-      toast(key.enabled ? 'API 密钥已禁用' : 'API 密钥已启用')
+      const apply = async () => {
+        const updated = await api('/v1/admin/api-keys/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled: !key.enabled } })
+        applyApiKey(updated)
+        toast(key.enabled ? 'API 密钥已禁用；现有 SSE 已关闭，正在执行的任务会继续' : 'API 密钥已启用')
+      }
+      if (key.enabled) {
+        openConfirmDrawer('禁用 API 密钥', '禁用会立即拒绝新请求，并关闭使用它的现有 SSE 连接；正在执行的任务会继续。已有会话在密钥重新启用后仍按原会话归属处理。', '禁用密钥', async () => { await apply() })
+      } else await apply()
     }
   })
 }
@@ -88,13 +98,14 @@ async function handleContentClick(event) {
     openAgentDrawer(state.config.agents.find((agent) => agent.id === button.dataset.agentEdit))
     return
   }
+  if (button.dataset.agentDiagnostics) { await openAgentDiagnostics(button.dataset.agentDiagnostics); return }
   if (button.dataset.agentDelete) {
     const id = button.dataset.agentDelete
     openConfirmDrawer('删除智能体', '删除后该智能体不再接受新任务，已有会话不受影响。', '删除智能体', async () => {
       state.config = await api('/v1/admin/agents/' + encodeURIComponent(id), { method: 'DELETE' })
-      await loadAll(true)
       render()
       toast('智能体已删除')
+      void loadAll(true)
     })
     return
   }
@@ -112,6 +123,7 @@ async function handleContentClick(event) {
     openConfirmDrawer('删除工作区', '删除后，新会话将无法再使用 ' + root + '；目录中的文件不会被删除。', '删除工作区', async () => {
       const roots = state.config.workspaceRoots.filter((_, itemIndex) => itemIndex !== index)
       state.config = await api('/v1/admin/config/workspace-roots', { method: 'PUT', body: { workspaceRoots: roots } })
+      markResourceSaved('config')
       render()
       toast('工作区已删除')
     })
@@ -130,7 +142,7 @@ byId('setup-form').onsubmit = async (event) => {
     error.textContent = ''
     const data = new FormData(form)
     try {
-      await api('/v1/bootstrap/initialize', { method: 'POST', body: { password: String(data.get('password') || ''), confirmPassword: String(data.get('confirmPassword') || '') } })
+      await api('/v1/bootstrap/initialize', { method: 'POST', body: { setupToken: String(data.get('setupToken') || '').trim(), password: String(data.get('password') || ''), confirmPassword: String(data.get('confirmPassword') || '') } })
       form.reset()
       showLogin()
       toast('初始化完成，请使用控制台密码登录。')
@@ -165,8 +177,10 @@ document.querySelectorAll('.nav-item').forEach((item) => {
       return
     }
     state.page = item.dataset.page
+    writeLocationState(state)
     render()
     if (state.page === 'runs') void refreshRuns(false)
+    if (state.page === 'overview') void retryResource('metrics')
   }
 })
 
@@ -231,15 +245,27 @@ document.addEventListener('keydown', (event) => {
 })
 window.addEventListener('resize', closeKeyActionMenu)
 window.addEventListener('scroll', closeKeyActionMenu, true)
+window.addEventListener('hashchange', () => {
+  Object.assign(state, readLocationState())
+  if (!state.authenticated) return
+  render()
+  if (state.page === 'runs') void refreshRuns(true)
+  if (state.selectedRunId) void openRunDrawer(state.selectedRunId)
+})
 
 /* ── Pollers ──────────────────────────────────────────────────────── */
 
 setInterval(() => {
-  if (state.authenticated) void refreshReadiness(false)
+  if (state.authenticated && !document.hidden && ['overview', 'agents'].includes(state.page)) void refreshReadiness(false)
 }, 20_000)
 
 setInterval(() => {
-  if (state.authenticated && state.page === 'runs') void refreshRuns(false)
+  if (state.authenticated && !document.hidden && state.page === 'runs') void refreshRuns(false)
+}, 5_000)
+
+setInterval(() => {
+  if (state.authenticated && !document.hidden) void refreshOpenRunDrawer()
+  if (state.authenticated && !document.hidden && state.page === 'overview') void retryResource('metrics')
 }, 5_000)
 
 void boot()

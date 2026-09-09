@@ -30,6 +30,7 @@ export interface AgentdTurnCompletion extends AgentdTurnCompletionProof {
 }
 
 export const agentdDriverKinds = [
+    'stdio',
     'opencode',
     'claude',
     'codex',
@@ -49,6 +50,8 @@ export interface AgentdDriverConfig {
     workspace?: string
     command?: string
     args?: string[]
+    /** Arguments used by a command availability probe. */
+    probeArgs?: string[]
     inheritEnv?: string[]
     env?: Record<string, string>
     permissionPolicy?: PermissionPolicy
@@ -74,6 +77,10 @@ export interface AgentdA2AConfig {
         headerName?: string
     }
     timeoutMs?: number
+    /** Maximum time allowed for one logical A2A task. Inherits global promptTimeoutMs when omitted. */
+    taskTimeoutMs?: number
+    /** Maximum time between bytes/events while reading an A2A stream. Inherits timeoutMs when omitted. */
+    streamIdleTimeoutMs?: number
 }
 
 export type AgentdAgentConfig = AgentdDriverConfig | AgentdA2AConfig
@@ -117,6 +124,19 @@ export interface AgentdConfig {
     maxConnections?: number
     adminSessionTtlMs?: number
     secureAdminCookies?: boolean
+    /** Exact browser origins for named LAN hosts or TLS reverse proxies. */
+    publicOrigins?: string[]
+    /** Per-client budgets; changes require a restart. */
+    quotas?: {
+        maxSessionsPerKey: number
+        maxRunningRunsPerKey: number
+        maxSsePerKey: number
+        maxUploadBytesPerKey: number
+    }
+    /** Persisted task metadata and output retention; active runs are protected. */
+    history?: { maxRuns: number; retentionDays: number; maxBytes: number }
+    /** Persisted artifact payload retention and queue limits. */
+    artifacts?: { retentionDays: number; maxBytes: number; maxArtifactBytes: number; maxQueuedBytes: number }
     agents: Record<string, AgentdAgentConfig>
 }
 
@@ -154,6 +174,8 @@ export interface AgentdAgentConfigView {
         configured: boolean
     }
     timeoutMs?: number
+    taskTimeoutMs?: number
+    streamIdleTimeoutMs?: number
 }
 
 export interface AgentdControlPlaneView {
@@ -284,17 +306,21 @@ export interface AgentdRunArtifactView {
     filename?: string
     mediaType?: string
     metadata?: Record<string, unknown>
+    size?: number
+    downloadable?: boolean
+    storageStatus?: 'pending' | 'available' | 'metadata_only' | 'expired' | 'evicted' | 'failed'
 }
 
 export interface AgentdRunView {
     id: string
     sessionId: string
+    retryOfRunId?: string
     agentId: string
     agentName: string
     protocol: AgentdProtocol
     workspace?: string
     protocolSessionId?: string
-    task: string
+    taskPreview: string
     taskTruncated?: boolean
     state: AgentdSessionState
     progress: AgentdRunProgress
@@ -310,8 +336,17 @@ export interface AgentdRunView {
 }
 
 export interface AgentdRunDetail extends AgentdRunView {
+    task: string
     output?: string
     artifacts: AgentdRunArtifactView[]
+    controls?: AgentdRunControls
+}
+
+export interface AgentdRunControls {
+    canCancel: boolean
+    canRetry: boolean
+    pendingRequest?: AgentdPendingRequest
+    unavailableReason?: string
 }
 
 export type AgentdEventType =

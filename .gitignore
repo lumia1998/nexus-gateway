@@ -13,4 +13,12 @@ nexus-agentd.json
 Thumbs.db
 
 nexus-agentd-runs.json
+*-runs.json.artifacts/
+*.json.artifacts/
+*.local.json
+*.local-runs.json
+!*.example.local.json
+nexus-gateway.tar.gz
+/data/
+/runtime/
 /.local-preview/
