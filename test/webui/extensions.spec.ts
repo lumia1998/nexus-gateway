@@ -159,9 +159,10 @@ test('overview uses global metrics and exposes recent failures', async ({ page }
     await page.locator('[data-page="overview"]').click()
     await expect(page.locator('#page-results')).toContainText('需要检查的失败任务')
     await expect(page.locator('.stat').filter({ hasText: '活动任务' }).locator('strong')).toHaveText('9')
-    await expect(page.locator('.stat').filter({ hasText: '现有会话' }).locator('strong')).toHaveText('7')
-    await expect(page.locator('.stat').filter({ hasText: '历史文件' }).locator('strong')).toHaveText('1.0 MiB')
-    await expect(page.locator('.stat').filter({ hasText: '待写入' }).locator('strong')).toHaveText('0')
+    const systemMetrics = page.locator('.run-detail-grid.compact')
+    await expect(systemMetrics.locator('.run-detail-item').filter({ hasText: '现有会话' }).locator('strong')).toHaveText('7')
+    await expect(systemMetrics.locator('.run-detail-item').filter({ hasText: '历史文件' }).locator('strong')).toHaveText('1.0 MiB')
+    await expect(systemMetrics.locator('.run-detail-item').filter({ hasText: '待写入' }).locator('strong')).toHaveText('0')
 })
 
 test('stdio onboarding and explicit connection diagnostics are available', async ({ page }) => {

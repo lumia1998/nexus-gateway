@@ -42,6 +42,9 @@ export function resetData() {
   state.metrics = null
   state.runTotal = state.sessions = state.runOffset = 0
   state.runStats = { active: 0, completed: 0, failed: 0 }
+  state.artifacts = []
+  state.artifactTotal = state.artifactOffset = 0
+  state.artifactAgent = state.artifactKind = 'all'
   state.runHasNew = false
   state.search = state.runSearch = ''
   state.protocol = state.status = state.runAgent = state.runStatus = 'all'

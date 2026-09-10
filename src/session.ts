@@ -5,7 +5,7 @@ import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime } from './a2a/runtime.js'
 import type { AgentDriver } from './drivers/index.js'
 import { SessionEventLog } from './events.js'
-import { RunStore, type RunListQuery } from './run-store.js'
+import { RunStore, type RunListQuery, type RunArtifactQuery } from './run-store.js'
 import {
     AdminRunManager,
     type AdminRetryReservation,
@@ -813,12 +813,35 @@ export class SessionManager {
         return store?.getOwnerKeyId?.(id)
     }
 
+    deleteRun(id: string) {
+        const store = this.runStore as
+            | (RunStore & {
+                  deleteRun?: (runId: string) => unknown
+              })
+            | undefined
+        return store?.deleteRun?.(id)
+    }
+
     ownsRun(id: string, keyId: string) {
         return this.getRunOwnerKeyId(id) === keyId
     }
 
     getRunArtifacts(id: string) {
         return this.getRun(id).artifacts
+    }
+
+    listArtifacts(query: RunArtifactQuery = {}) {
+        const store = this.runStore as
+            | (RunStore & { listArtifacts?: (q: RunArtifactQuery) => unknown })
+            | undefined
+        return store?.listArtifacts?.(query) || { artifacts: [], total: 0 }
+    }
+
+    async removeRunArtifact(runId: string, artifactId: string) {
+        const store = this.runStore as
+            | (RunStore & { removeArtifact?: (runId: string, artifactId: string) => Promise<unknown> | unknown })
+            | undefined
+        return store?.removeArtifact?.(runId, artifactId)
     }
 
     getStorageMetrics(): ReturnType<RunStore['metrics']> | undefined {

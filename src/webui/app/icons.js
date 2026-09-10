@@ -16,6 +16,10 @@ export const icons = {
   folder: svg('<path d="M20 20a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7.1a2 2 0 0 1-1.66-.89l-.75-1.12A2 2 0 0 0 8.83 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/>'),
   robot: svg('<path d="M12 8V4.5"/><circle cx="12" cy="3" r="1.1"/><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M9.5 13v1.6"/><path d="M14.5 13v1.6"/><path d="M9.5 17.2h5"/>'),
   activity: svg('<path d="M22 12h-2.5a2 2 0 0 0-1.93 1.46l-2.1 7.4a.25.25 0 0 1-.48 0L9.24 3.14a.25.25 0 0 0-.48 0l-2.1 7.4A2 2 0 0 1 4.73 12H2"/>'),
+  artifacts: svg('<path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>'),
+  file: svg('<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z"/><path d="M9 13h6"/><path d="M9 17h4"/>'),
+  video: svg('<rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/>'),
+  audio: svg('<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>'),
   key: svg('<circle cx="8" cy="15" r="4.2"/><path d="m11.1 12 8-8"/><path d="m15.4 7.7 2.9 2.9"/><path d="m17.6 5.5 2.9 2.9"/>')
 }
 

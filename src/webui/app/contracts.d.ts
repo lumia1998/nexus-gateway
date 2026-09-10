@@ -1,11 +1,28 @@
 import type { AgentdAgentView, AgentdApiKeyView, AgentdControlPlaneView, AgentdRunView } from '../../types.js'
 
-export type Page = 'overview' | 'runs' | 'agents' | 'workspaces' | 'keys' | 'settings'
+export type Page = 'overview' | 'runs' | 'artifacts' | 'agents' | 'workspaces' | 'keys' | 'settings'
 export type Resource = 'config' | 'apiKeys' | 'overview' | 'runs' | 'metrics'
 export interface ResourceState { status: 'idle' | 'loading' | 'ready' | 'error'; lastSuccessAt: number }
 export type ConfigState = Pick<AgentdControlPlaneView, 'workspaceRoots' | 'driverKinds' | 'agents'> & Partial<AgentdControlPlaneView>
 export interface RunStats { active: number; completed: number; failed: number }
 export interface RunListPayload { runs: AgentdRunView[]; total: number; stats: RunStats }
+export interface ArtifactRow {
+  id: string
+  runId: string
+  agentId: string
+  agentName: string
+  runState: string
+  runStartedAt: number
+  name?: string
+  filename?: string
+  mediaType?: string
+  size?: number
+  kind: string
+  downloadable: boolean
+  storageStatus?: string
+  createdAt?: number
+}
+export interface ArtifactListPayload { artifacts: ArtifactRow[]; total: number }
 export interface OverviewPayload { agents: AgentdAgentView[]; sessions: number }
 export interface MetricsPayload {
   runs?: RunStats & { total: number }
@@ -44,6 +61,11 @@ export interface WebUiState {
   runOffset: number
   runPageSize: number
   runHasNew: boolean
+  artifacts: ArtifactRow[]
+  artifactTotal: number
+  artifactAgent: string
+  artifactKind: string
+  artifactOffset: number
   selectedRunId?: string
   authEpoch: number
   authenticated: boolean

@@ -31,6 +31,7 @@ export const markup = String.raw`
         <p class="nav-group-label" id="nav-group-run">运行</p>
         <button class="nav-item active" data-page="overview">${icons.overview}<span>总览</span></button>
         <button class="nav-item" data-page="runs">${icons.runs}<span>运行记录</span></button>
+        <button class="nav-item" data-page="artifacts">${icons.artifacts}<span>产物</span></button>
       </div>
       <div class="nav-group" role="group" aria-labelledby="nav-group-config">
         <p class="nav-group-label" id="nav-group-config">网关配置</p>

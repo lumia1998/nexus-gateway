@@ -158,6 +158,7 @@ export class AdminRunManager {
         return {
             canCancel: current && active && Boolean(session?.runtimeAvailable()),
             canRetry,
+            canDelete: isTerminal(run.state),
             ...(pendingRequest ? { pendingRequest } : {}),
             ...(unavailableReason ? { unavailableReason } : {})
         }

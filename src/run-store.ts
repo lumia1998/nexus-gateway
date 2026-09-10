@@ -74,6 +74,41 @@ export interface RunListQuery {
     offset?: number
 }
 
+export interface RunArtifactQuery {
+    agentId?: string
+    /** 'all' keeps every kind; otherwise one of artifactKind() values. */
+    kind?: string
+    query?: string
+    limit?: number
+    offset?: number
+}
+
+export interface RunArtifactRow {
+    id: string
+    runId: string
+    agentId: string
+    agentName: string
+    runState: AgentdSessionState
+    runStartedAt: number
+    name?: string
+    filename?: string
+    mediaType?: string
+    size?: number
+    kind: string
+    downloadable: boolean
+    storageStatus?: string
+    createdAt?: number
+}
+
+/** Coarse bucket used by the console filter and list grouping. */
+export function artifactKind(mediaType: string | undefined) {
+    const type = String(mediaType || '').toLowerCase()
+    if (type.startsWith('image/')) return 'image'
+    if (type.startsWith('video/')) return 'video'
+    if (type.startsWith('audio/')) return 'audio'
+    return 'file'
+}
+
 const STATES = new Set<AgentdSessionState>([
     'created',
     'running',
@@ -298,6 +333,52 @@ export class RunStore {
         return this.artifactStore.readArtifact(runId, artifactId)
     }
 
+    /** Flat, newest-first artifact index across all retained runs. */
+    listArtifacts(query: RunArtifactQuery = {}) {
+        this.assertInitialized()
+        const needle = String(query.query || '').trim().toLowerCase()
+        const limit = Math.min(200, Math.max(1, Number(query.limit) || 50))
+        const offset = Math.max(0, Math.floor(Number(query.offset) || 0))
+        const rows: RunArtifactRow[] = []
+        for (const run of this.runs.values()) {
+            for (const view of run.artifacts || []) {
+                if (!view.id) continue
+                if (query.agentId && run.agentId !== query.agentId) continue
+                const kind = artifactKind(view.mediaType)
+                if (query.kind && query.kind !== 'all' && kind !== query.kind) continue
+                if (needle) {
+                    const haystack = `${view.name || ''} ${view.filename || ''}`.toLowerCase()
+                    if (!haystack.includes(needle)) continue
+                }
+                rows.push({
+                    id: view.id,
+                    runId: run.id,
+                    agentId: run.agentId,
+                    agentName: run.agentName,
+                    runState: run.state,
+                    runStartedAt: run.startedAt,
+                    name: view.name,
+                    filename: view.filename,
+                    mediaType: view.mediaType,
+                    size: view.size,
+                    kind,
+                    downloadable: view.downloadable === true,
+                    storageStatus: view.storageStatus,
+                    createdAt: view.createdAt
+                })
+            }
+        }
+        rows.sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0))
+        return { artifacts: rows.slice(offset, offset + limit), total: rows.length }
+    }
+
+    /** Delete one artifact's payload and record entry; the run record stays. */
+    async removeArtifact(runId: string, artifactId: string) {
+        this.assertInitialized()
+        if (!this.runs.has(runId)) return false
+        return this.artifactStore.removeArtifact(runId, artifactId)
+    }
+
     getOwnerKeyId(runId: string) {
         this.assertInitialized()
         return this.runs.get(runId)?.ownerKeyId
@@ -324,6 +405,21 @@ export class RunStore {
 
     setRetryOfRunId(runId: string, retryOfRunId?: string) {
         return this.update(runId, { retryOfRunId } as Partial<Pick<StoredRun, 'retryOfRunId'>>)
+    }
+
+    /**
+     * Remove a terminal run record and its stored artifacts. Active runs are
+     * refused so a live turn cannot lose its progress tracking.
+     */
+    deleteRun(id: string) {
+        this.assertInitialized()
+        const run = this.runs.get(id)
+        if (!run) return undefined
+        if (isActive(run.state)) return undefined
+        this.runs.delete(id)
+        this.artifactStore.removeRun(id)
+        this.changed()
+        return publicDetail(run)
     }
 
     get(id: string) {

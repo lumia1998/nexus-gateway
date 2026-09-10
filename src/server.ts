@@ -691,6 +691,16 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
         await handleAdminRunAction(context, decodeURIComponent(runActionMatch[1]), runActionMatch[2] as 'cancel' | 'retry' | 'respond')
         return
     }
+    if (url.pathname === '/v1/admin/artifacts' && request.method === 'GET') {
+        writeJson(response, 200, sessions.listArtifacts({
+            agentId: cleanQuery(url.searchParams.get('agentId')),
+            kind: cleanQuery(url.searchParams.get('kind')),
+            query: cleanQuery(url.searchParams.get('q')),
+            offset: boundedOffset(url.searchParams.get('offset')),
+            limit: boundedLimit(url.searchParams.get('limit'))
+        }))
+        return
+    }
     const adminArtifactMatch = url.pathname.match(
         /^\/v1\/admin\/runs\/([^/]+)\/artifacts\/([^/]+)$/
     )
@@ -704,9 +714,50 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
         )
         return
     }
+    if (adminArtifactMatch && request.method === 'DELETE') {
+        await assertEmptyJsonBody(request, config.maxRequestBytes)
+        const runId = decodeURIComponent(adminArtifactMatch[1])
+        const artifactId = decodeURIComponent(adminArtifactMatch[2])
+        const run = sessions.getRun(runId)
+        if (!isTerminalState(run.state)) {
+            throw new RequestError(409, 'Artifacts of active runs cannot be deleted; cancel the task first')
+        }
+        const deleted = await sessions.removeRunArtifact(runId, artifactId)
+        if (!deleted) throw new RequestError(404, 'Agent Nexus artifact not found')
+        console.info(JSON.stringify({
+            level: 'info',
+            event: 'admin_artifact_deleted',
+            runId,
+            artifactId,
+            agentId: run.agentId,
+            requestId: String(response.getHeader('X-Request-Id') || '')
+        }))
+        writeJson(response, 200, { deleted: true, runId, artifactId })
+        return
+    }
     const runMatch = url.pathname.match(/^\/v1\/admin\/runs\/([^/]+)$/)
-    if (runMatch && request.method === 'GET') {
+    if (runMatch && (request.method === 'GET' || request.method === 'DELETE')) {
         const runId = decodeURIComponent(runMatch[1])
+        if (request.method === 'DELETE') {
+            await assertEmptyJsonBody(request, config.maxRequestBytes)
+            const detail = sessions.getRun(runId)
+            if (!isTerminalState(detail.state)) {
+                throw new RequestError(409, 'Active runs cannot be deleted; cancel the task first')
+            }
+            const deleted = sessions.deleteRun(runId)
+            if (!deleted) throw new RequestError(404, 'Agent Nexus run not found')
+            console.info(JSON.stringify({
+                level: 'info',
+                event: 'admin_run_record_deleted',
+                runId,
+                sessionId: detail.sessionId,
+                agentId: detail.agentId,
+                state: detail.state,
+                requestId: String(response.getHeader('X-Request-Id') || '')
+            }))
+            writeJson(response, 200, { deleted: true, id: runId })
+            return
+        }
         const detail = sessions.getRun(runId)
         writeJson(response, 200, {
             ...detail,
@@ -1018,6 +1069,7 @@ function buildRunControls(sessions: SessionManager, detail: any) {
     return {
         canCancel,
         canRetry,
+        canDelete: !active,
         ...(pendingRequest ? { pendingRequest: structuredClone(pendingRequest) } : {}),
         ...(unavailableReason ? { unavailableReason } : {})
     }

@@ -514,6 +514,34 @@ export class ArtifactStore {
         this.scheduleDrain()
     }
 
+    /**
+     * Delete a single artifact: drop its payload file and record entry. The
+     * run record itself stays; its artifacts list shrinks via the views
+     * callback. Refused while the payload write is still in flight.
+     */
+    async removeArtifact(runId: string, artifactId: string) {
+        this.assertInitialized()
+        const key = entryKey(runId, artifactId)
+        const entry = this.entries.get(key)
+        if (!entry) return false
+        if (this.inFlight.has(key)) return false
+        const batch = this.pending.get(runId)
+        const queued = batch?.get(artifactId)
+        if (queued) {
+            this.queuedBytes -= queued.bytes.length
+            batch!.delete(artifactId)
+            if (!batch!.size) this.pending.delete(runId)
+        }
+        if (entry.filePath) {
+            await this.safeUnlink(entry.filePath)
+            this.totalBytes -= entry.bytes || 0
+        }
+        this.entries.delete(key)
+        await this.writeManifest(runId)
+        this.emit(runId, this.viewsForRun(runId))
+        return true
+    }
+
     async flush() {
         this.assertInitialized()
         if (this.activeDrain) await this.activeDrain

@@ -8,10 +8,12 @@ import { renderAgents } from './render-agents.js'
 import { renderWorkspaces } from './render-workspaces.js'
 import { renderApiKeys, closeKeyActionMenu } from './render-keys.js'
 import { renderSettings } from './render-settings.js'
+import { renderArtifacts } from './render-artifacts.js'
 export * from './render-runs.js'
 export * from './render-agents.js'
 export * from './render-workspaces.js'
 export * from './render-keys.js'
+export * from './render-artifacts.js'
 export function resetView() {
  resetRunView()
  closeKeyActionMenu()
@@ -30,6 +32,7 @@ export function render() {
   if (state.page !== 'runs' && state.page !== 'agents') setToolbar('')
   if (state.page === 'overview') renderOverview()
   if (state.page === 'runs') renderRuns()
+  if (state.page === 'artifacts') renderArtifacts()
   if (state.page === 'agents') renderAgents()
   if (state.page === 'workspaces') renderWorkspaces()
   if (state.page === 'keys') renderApiKeys()

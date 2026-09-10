@@ -37,3 +37,21 @@ export function permissionLabel(value) {
   if (value === 'deny') return '拒绝'
   return value || '—'
 }
+
+export function formatSize(bytes) {
+  if (bytes == null) return '—'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+export const kindLabels = {
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+  file: '文件'
+}
+
+export function kindLabel(kind) {
+  return kindLabels[kind] || kind || '文件'
+}

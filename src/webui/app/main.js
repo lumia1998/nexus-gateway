@@ -23,7 +23,10 @@ import {
   applyApiKey,
   toggleKeyActionMenu,
   handleKeyMenuKeydown,
-  closeKeyActionMenu
+  closeKeyActionMenu,
+  openArtifactDetail,
+  confirmArtifactDelete,
+  loadArtifacts
 } from './render.js'
 
 function handleKeyAction(action, id) {
@@ -84,6 +87,32 @@ async function handleContentClick(event) {
   }
   const button = event.target.closest('button')
   if (!button) return
+  if (button.dataset.runQuickCancel) {
+    const id = button.dataset.runQuickCancel
+    openConfirmDrawer('取消任务', '取消当前任务并释放智能体会话。已经完成的文件或外部操作不会撤回。', '取消任务', async () => {
+      await api('/v1/admin/runs/' + encodeURIComponent(id) + '/cancel', { method: 'POST', body: {} })
+      toast('任务已取消')
+      void retryResource('metrics')
+    })
+    return
+  }
+  if (button.dataset.runQuickDelete) {
+    const id = button.dataset.runQuickDelete
+    openConfirmDrawer('删除运行记录', '仅删除这条历史记录与已保存的产物文件，不影响智能体配置和客户端会话。此操作无法撤销。', '删除记录', async () => {
+      await api('/v1/admin/runs/' + encodeURIComponent(id), { method: 'DELETE', body: {} })
+      toast('运行记录已删除')
+      void retryResource('metrics')
+    })
+    return
+  }
+  if (button.dataset.artifactDetail) {
+    openArtifactDetail(button.dataset.artifactDetail, button.dataset.artifactRun)
+    return
+  }
+  if (button.dataset.artifactDelete) {
+    confirmArtifactDelete(button.dataset.artifactDelete, button.dataset.artifactRun)
+    return
+  }
   if (button.dataset.emptyAction) {
     if (button.dataset.emptyAction === 'add-agent') openAgentDrawer()
     if (button.dataset.emptyAction === 'create-key') openKeyDrawer()
@@ -181,6 +210,7 @@ document.querySelectorAll('.nav-item').forEach((item) => {
     render()
     if (state.page === 'runs') void refreshRuns(false)
     if (state.page === 'overview') void retryResource('metrics')
+    if (state.page === 'artifacts') void loadArtifacts(false)
   }
 })
 
@@ -250,6 +280,7 @@ window.addEventListener('hashchange', () => {
   if (!state.authenticated) return
   render()
   if (state.page === 'runs') void refreshRuns(true)
+  if (state.page === 'artifacts') void loadArtifacts(false)
   if (state.selectedRunId) void openRunDrawer(state.selectedRunId)
 })
 

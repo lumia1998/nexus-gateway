@@ -8,6 +8,9 @@ export const icons = {
     runs: base(
         '<path d="M22 12h-2.5a2 2 0 0 0-1.93 1.46l-2.1 7.4a.25.25 0 0 1-.48 0L9.24 3.14a.25.25 0 0 0-.48 0l-2.1 7.4A2 2 0 0 1 4.73 12H2"/>'
     ),
+    artifacts: base(
+        '<path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>'
+    ),
     agents: base(
         '<path d="M12 8V4.5"/><circle cx="12" cy="3" r="1.1"/><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M9.5 13v1.6"/><path d="M14.5 13v1.6"/><path d="M9.5 17.2h5"/>'
     ),

@@ -3,7 +3,7 @@ import { byId, pageStats, drawerForm, escapeHtml, selected } from './dom.js'
 import { icons } from './icons.js'
 import { api } from './api.js'
 import { withBusy, toast, runAction } from './toast.js'
-import { openDrawer, getDrawerVersion, openConfirmDrawer } from './drawer.js'
+import { openDrawer, getDrawerVersion, openConfirmDrawer, closeDrawer } from './drawer.js'
 import { copySecret } from './render-keys.js'
 import { writeLocationState } from './location-state.js'
 
@@ -190,7 +190,7 @@ function renderRunDetail(target, run) {
   if (!drawerForm.querySelector('[data-run-detail-body]')) {
     drawerForm.innerHTML = '<div data-run-detail-body>' +
       '<p class="field-help">管理员可介入任意客户端的任务；操作会记录审计日志。重试使用新会话，旧记录保留。</p>' +
-      '<div class="run-detail-actions"><button type="button" class="button small" data-run-copy="id">复制运行 ID</button><button type="button" class="button small" data-run-copy="output">复制结果</button><button type="button" class="button small" data-run-copy="error">复制错误</button><button type="button" class="button small danger" data-run-cancel>取消任务</button><button type="button" class="button small" data-run-retry>新会话重试</button><button type="button" class="button small" data-run-refresh>刷新</button></div>' +
+      '<div class="run-detail-actions"><button type="button" class="button small" data-run-copy="id">复制运行 ID</button><button type="button" class="button small" data-run-copy="output">复制结果</button><button type="button" class="button small" data-run-copy="error">复制错误</button><button type="button" class="button small danger" data-run-cancel>取消任务</button><button type="button" class="button small" data-run-retry>新会话重试</button><button type="button" class="button small danger" data-run-delete>删除记录</button><button type="button" class="button small" data-run-refresh>刷新</button></div>' +
       '<p class="field-help" data-controls-reason></p><p class="form-error" data-detail-error role="status"></p>' +
       '<div class="run-detail-grid">' +
       [['agent','智能体'],['state','状态'],['startedAt','开始时间'],['duration','耗时'],['protocol','协议'],['id','运行 ID'],['phase','当前阶段'],['attachments','输入附件'],['retry','重试来源']]
@@ -223,12 +223,15 @@ function renderRunDetail(target, run) {
   const controls = run.controls || {}
   const cancel = drawerForm.querySelector('[data-run-cancel]')
   const retry = drawerForm.querySelector('[data-run-retry]')
+  const remove = drawerForm.querySelector('[data-run-delete]')
   cancel.disabled = !controls.canCancel
   retry.disabled = !controls.canRetry
+  remove.disabled = !controls.canDelete
   updateDetailText(drawerForm.querySelector('[data-controls-reason]'), controls.unavailableReason || '')
   drawerForm.querySelector('[data-run-refresh]').onclick = () => { void refreshOpenRunDrawer() }
   cancel.onclick = () => confirmRunAction(run, 'cancel')
   retry.onclick = () => confirmRunAction(run, 'retry')
+  remove.onclick = () => confirmRunAction(run, 'delete')
   for (const button of drawerForm.querySelectorAll('[data-run-copy]')) {
     const value = run[button.dataset.runCopy]
     button.disabled = !value
@@ -238,6 +241,15 @@ function renderRunDetail(target, run) {
 }
 
 function confirmRunAction(run, action) {
+  if (action === 'delete') {
+    openConfirmDrawer('删除运行记录', '仅删除这条历史记录与已保存的产物文件，不影响智能体配置和客户端会话。此操作无法撤销。', '删除记录', async (isCurrent) => {
+      await api('/v1/admin/runs/' + encodeURIComponent(run.id), { method: 'DELETE', body: {} })
+      toast('运行记录已删除')
+      void refreshRuns(false)
+      if (isCurrent()) closeDrawer()
+    })
+    return
+  }
   const retry = action === 'retry'
   openConfirmDrawer(retry ? '新会话重试' : '取消任务',
     retry ? '将用原任务文本创建新的会话，使用当前智能体配置。旧记录保留；任务已经产生的外部操作可能重复执行。' : '取消当前任务并释放智能体会话。已经完成的文件或外部操作不会撤回。',

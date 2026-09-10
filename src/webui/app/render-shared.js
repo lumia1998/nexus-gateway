@@ -42,8 +42,10 @@ export function announce(message) {
   if (pageStatus.textContent !== summary) pageStatus.textContent = summary
 }
 
-export function stat(label, value) {
-  return '<div class="stat"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(value) + '</strong></div>'
+export function stat(label, value, href) {
+  const open = href ? '<a class="stat" href="' + escapeHtml(href) + '">' : '<div class="stat">'
+  const close = href ? '</a>' : '</div>'
+  return open + '<span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(value) + '</strong>' + close
 }
 
 export function emptyState(icon, title, text, cta) {

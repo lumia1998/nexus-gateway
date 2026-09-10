@@ -309,6 +309,7 @@ export interface AgentdRunArtifactView {
     size?: number
     downloadable?: boolean
     storageStatus?: 'pending' | 'available' | 'metadata_only' | 'expired' | 'evicted' | 'failed'
+    createdAt?: number
 }
 
 export interface AgentdRunView {
@@ -345,6 +346,7 @@ export interface AgentdRunDetail extends AgentdRunView {
 export interface AgentdRunControls {
     canCancel: boolean
     canRetry: boolean
+    canDelete?: boolean
     pendingRequest?: AgentdPendingRequest
     unavailableReason?: string
 }
