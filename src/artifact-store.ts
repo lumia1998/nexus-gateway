@@ -169,6 +169,7 @@ export class ArtifactStore {
     private readonly pending = new Map<string, Map<string, PendingArtifact>>()
     private readonly inFlight = new Map<string, PendingArtifact>()
     private readonly pendingDeletes = new Set<string>()
+    private readonly pendingManifests = new Set<string>()
     private queuedBytes = 0
     private totalBytes = 0
     private activeDrain?: Promise<void>
@@ -419,10 +420,47 @@ export class ArtifactStore {
             this.entries.set(entryKey(runId, normalized.id), entry)
             byId.set(normalized.id, next)
         }
-        const views = Array.from(byId.values()).slice(0, this.maxArtifactsPerRun)
+        this.trimRunEntries(runId)
+        const views = this.viewsForRun(runId)
         this.emit(runId, views)
         this.scheduleDrain()
         return structuredClone(views)
+    }
+
+    /**
+     * Caps how many artifacts a single run retains. `recordArtifacts` is
+     * incremental, so a protocol stream that reports a fresh id per event
+     * (screenshots, timestamped logs) would otherwise grow `entries` without
+     * bound and make every emit clone the whole run.
+     */
+    private trimRunEntries(runId: string) {
+        const entries = Array.from(this.entries.values())
+            .filter((entry) => entry.runId === runId)
+            .sort((left, right) => left.view.createdAt - right.view.createdAt)
+        let excess = entries.length - this.maxArtifactsPerRun
+        if (excess <= 0) return
+        for (const entry of entries) {
+            if (excess <= 0) break
+            // An in-flight payload cannot be unlinked while it is being
+            // written; it is the newest entry in practice, so a later call
+            // trims it instead.
+            if (this.inFlight.has(entryKey(runId, entry.id))) continue
+            this.dropEntry(entry)
+            excess -= 1
+        }
+    }
+
+    private dropEntry(entry: ArtifactEntry) {
+        this.entries.delete(entryKey(entry.runId, entry.id))
+        this.removePending(entry.runId, entry.id)
+        this.totalBytes -= entry.bytes || 0
+        if (entry.filePath) {
+            const filePath = entry.filePath
+            void this.safeUnlink(filePath).catch(() => undefined)
+        }
+        // The manifest still lists the dropped entry; rewrite it on the next
+        // drain so a restart cannot resurrect an artifact with no payload.
+        this.pendingManifests.add(entry.runId)
     }
 
     /** Merge display metadata from a RunStore update without dropping storage state. */
@@ -510,6 +548,7 @@ export class ArtifactStore {
             for (const item of pending.values()) this.queuedBytes -= item.bytes.length
             this.pending.delete(runId)
         }
+        this.pendingManifests.delete(runId)
         this.pendingDeletes.add(runId)
         this.scheduleDrain()
     }
@@ -545,7 +584,7 @@ export class ArtifactStore {
     async flush() {
         this.assertInitialized()
         if (this.activeDrain) await this.activeDrain
-        if (this.pending.size || this.pendingDeletes.size) {
+        if (this.pending.size || this.pendingDeletes.size || this.pendingManifests.size) {
             // A previous background attempt may have failed. Keep the
             // snapshot dirty and let an explicit flush retry it.
             this.lastError = undefined
@@ -611,11 +650,26 @@ export class ArtifactStore {
 
     private async drainLoop() {
         this.lastError = undefined
-        while (this.pending.size || this.pendingDeletes.size) {
+        while (this.pending.size || this.pendingDeletes.size || this.pendingManifests.size) {
             const runId = this.pendingDeletes.values().next().value as string | undefined
             if (runId) {
                 this.pendingDeletes.delete(runId)
-                await this.deleteRunDirectory(runId)
+                try {
+                    await this.deleteRunDirectory(runId)
+                } catch (error) {
+                    // Keep the delete queued: dropping it would leave the
+                    // directory on disk with no record left to remove it.
+                    this.pendingDeletes.add(runId)
+                    throw error
+                }
+                continue
+            }
+            const manifestRunId = this.pendingManifests.values().next().value as string | undefined
+            if (manifestRunId) {
+                this.pendingManifests.delete(manifestRunId)
+                // removeRun drops the whole directory; rewriting a manifest
+                // afterwards would recreate it.
+                if (this.runIds.has(manifestRunId)) await this.writeManifest(manifestRunId)
                 continue
             }
             const batchEntry = this.pending.entries().next().value as
@@ -654,7 +708,13 @@ export class ArtifactStore {
         const startedAt = performance.now()
         const key = entryKey(item.runId, item.id)
         let entry = this.entries.get(key)
-        if (!entry) return
+        if (!entry) {
+            // The entry was dropped after this batch left `pending`, so
+            // removeRun and dropEntry could no longer see it there. Releasing
+            // the budget here is the only remaining place that can.
+            this.queuedBytes -= item.bytes.length
+            return
+        }
         const runDir = this.runDirectory(item.runId)
         await this.io.mkdir(runDir, { recursive: true, mode: 0o700 })
         await this.ensureDirectory(runDir, false)

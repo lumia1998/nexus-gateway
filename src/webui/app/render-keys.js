@@ -80,7 +80,7 @@ export function showSecret(title, secret) {
   }
 }
 
-export async function copySecret(secret) {
+export async function copySecret(secret, fallbackHint = '请在“显示完整密钥”中手动复制') {
   if (navigator.clipboard && window.isSecureContext) {
     try {
       await navigator.clipboard.writeText(secret)
@@ -100,7 +100,7 @@ export async function copySecret(secret) {
   const copied = document.execCommand('copy')
   temporary.remove()
   previousFocus?.focus({ preventScroll: true })
-  if (!copied) throw new Error('无法自动复制，请在“显示完整密钥”中手动复制。')
+  if (!copied) throw new Error(`无法自动复制，${fallbackHint}。`)
 }
 
 export function openPasswordDrawer() {

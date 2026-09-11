@@ -47,18 +47,18 @@ export function renderSettings() {
     '<p class="settings-note" data-runtime-loading role="status"' + (configLoading ? '' : ' hidden') + '>运行参数尚未成功读取，暂不能保存默认值；可单独修改控制台密码。</p>' +
     '<p class="form-error settings-form-error" data-form-error role="alert"></p>' +
     '</section></form>' +
-    '<section class="settings-section settings-appearance"><div class="settings-section-heading"><h2>外观</h2>' +
+    '<div class="settings-layout"><section class="settings-section settings-appearance"><div class="settings-section-heading"><h2>外观</h2>' +
     '<p class="settings-note">仅影响当前浏览器。</p></div>' +
     '<div class="settings-fields"><div class="field"><label for="theme-select">界面主题</label>' +
     '<select id="theme-select"><option value="system"' + selected(theme, 'system') + '>跟随系统</option><option value="light"' + selected(theme, 'light') + '>浅色</option><option value="dark"' + selected(theme, 'dark') + '>深色</option></select>' +
-    '</div></div></section>' +
+    '</div></div></section></div>' +
     '<form id="password-form" class="settings-layout settings-password-layout">' +
-    '<section class="settings-section settings-account"><div class="settings-section-heading"><h2>账户</h2></div>' +
-    '<div class="settings-account-row"><div class="settings-account-copy"><strong>控制台密码</strong><p>用于登录当前管理控制台。</p></div>' +
-    '<div class="settings-account-fields"><div class="field"><label for="settings-current-password">当前密码</label><input id="settings-current-password" name="currentPassword" type="password" autocomplete="current-password"></div>' +
+    '<section class="settings-section settings-account"><div class="settings-section-heading"><h2>账户</h2>' +
+    '<p class="settings-note">控制台密码用于登录当前管理控制台。</p></div>' +
+    '<div class="settings-fields">' +
+    '<div class="field"><label for="settings-current-password">当前密码</label><input id="settings-current-password" name="currentPassword" type="password" autocomplete="current-password"></div>' +
     '<div class="field"><label for="settings-new-password">新密码</label><input id="settings-new-password" name="newPassword" type="password" minlength="12" autocomplete="new-password"></div>' +
-    '<div class="field"><label for="settings-confirm-password">确认新密码</label><input id="settings-confirm-password" name="confirmPassword" type="password" minlength="12" autocomplete="new-password"></div></div></div>' +
-    '</section>' +
+    '<div class="field"><label for="settings-confirm-password">确认新密码</label><input id="settings-confirm-password" name="confirmPassword" type="password" minlength="12" autocomplete="new-password"></div></div></section>' +
     '<p class="form-error settings-password-error" data-password-error role="alert"></p>' +
     '</form>')
   const form = byId('settings-form')

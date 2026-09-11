@@ -568,12 +568,12 @@ test('settings uses a centered, cardless section layout', async ({ page }) => {
 
     await page.setViewportSize({ width: 390, height: 844 })
     const mobile = await page.evaluate(() => {
-        const account = document.querySelector('.settings-account-row')!.getBoundingClientRect()
-        const fields = document.querySelector('.settings-account-fields')!.getBoundingClientRect()
-        return { pageWidth: document.documentElement.scrollWidth, viewport: innerWidth, fieldsTop: fields.top, accountTop: account.top }
+        const heading = document.querySelector('.settings-account .settings-section-heading')!.getBoundingClientRect()
+        const fields = document.querySelector('.settings-account .settings-fields')!.getBoundingClientRect()
+        return { pageWidth: document.documentElement.scrollWidth, viewport: innerWidth, fieldsTop: fields.top, headingTop: heading.top }
     })
     expect(mobile.pageWidth).toBeLessThanOrEqual(mobile.viewport)
-    expect(mobile.fieldsTop).toBeGreaterThan(mobile.accountTop)
+    expect(mobile.fieldsTop).toBeGreaterThan(mobile.headingTop)
 })
 
 test('settings keeps one save action and separates logout in the sidebar', async ({ page }) => {

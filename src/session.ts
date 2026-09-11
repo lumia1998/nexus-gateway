@@ -1171,9 +1171,46 @@ function mediaTypeForPath(path: string) {
         case '.txt':
         case '.log':
         case '.md':
+        case '.markdown':
+        case '.conf':
+        case '.ini':
+        case '.toml':
+        case '.env':
             return 'text/plain'
         case '.json':
             return 'application/json'
+        case '.html':
+        case '.htm':
+            return 'text/html'
+        case '.css':
+            return 'text/css'
+        case '.js':
+        case '.mjs':
+        case '.cjs':
+            return 'text/javascript'
+        case '.ts':
+        case '.tsx':
+        case '.jsx':
+        case '.py':
+        case '.rb':
+        case '.go':
+        case '.rs':
+        case '.java':
+        case '.c':
+        case '.h':
+        case '.cpp':
+        case '.sh':
+        case '.bash':
+        case '.ps1':
+        case '.sql':
+            return 'text/plain'
+        case '.yaml':
+        case '.yml':
+            return 'text/yaml'
+        case '.xml':
+            return 'application/xml'
+        case '.csv':
+            return 'text/csv'
         case '.pdf':
             return 'application/pdf'
         case '.png':
@@ -1187,10 +1224,41 @@ function mediaTypeForPath(path: string) {
             return 'image/webp'
         case '.svg':
             return 'image/svg+xml'
-        case '.csv':
-            return 'text/csv'
+        case '.bmp':
+            return 'image/bmp'
+        case '.ico':
+            return 'image/x-icon'
+        case '.wav':
+            return 'audio/wav'
+        case '.mp3':
+            return 'audio/mpeg'
+        case '.ogg':
+        case '.oga':
+            return 'audio/ogg'
+        case '.m4a':
+            return 'audio/mp4'
+        case '.aac':
+            return 'audio/aac'
+        case '.flac':
+            return 'audio/flac'
+        case '.mp4':
+            return 'video/mp4'
+        case '.webm':
+            return 'video/webm'
+        case '.mov':
+            return 'video/quicktime'
+        case '.mkv':
+            return 'video/x-matroska'
         case '.zip':
             return 'application/zip'
+        case '.doc':
+            return 'application/msword'
+        case '.docx':
+            return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        case '.xlsx':
+            return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        case '.pptx':
+            return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
         default:
             return 'application/octet-stream'
     }

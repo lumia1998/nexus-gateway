@@ -578,15 +578,33 @@ export class RunStore {
     private applyArtifactViews(runId: string, views: StoredArtifactView[]) {
         const run = this.runs.get(runId)
         if (!run) return
-        run.artifacts = structuredClone(views)
-        run.artifactCount = run.artifacts.length
-        run.updatedAt = this.now()
         if (!this.initialized) {
+            // The artifact store prunes during its own init and emits as it
+            // goes, but at that point it only knows about manifest-backed
+            // entries — the rest of runs.json has not been restored yet.
+            // Replacing wholesale would drop metadata-only artifacts for good,
+            // while skipping the update would lose the storage status the
+            // prune just decided (expired/evicted), which restoreRun then
+            // misreads as metadata_only. Merge both sides instead.
+            run.artifacts = mergeArtifactViews(run.artifacts, views)
+            run.artifactCount = run.artifacts.length
             this.dirty = true
             return
         }
+        run.artifacts = structuredClone(views)
+        run.artifactCount = run.artifacts.length
+        run.updatedAt = this.now()
         this.changed()
     }
+}
+
+function mergeArtifactViews(
+    existing: AgentdRunArtifactView[],
+    incoming: AgentdRunArtifactView[]
+): AgentdRunArtifactView[] {
+    const merged = new Map(existing.map((view) => [view.id, view]))
+    for (const view of incoming) merged.set(view.id, view)
+    return Array.from(merged.values())
 }
 
 export function runStorePathForConfig(configPath: string) {

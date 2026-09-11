@@ -22,3 +22,7 @@ nexus-gateway.tar.gz
 /data/
 /runtime/
 /.local-preview/
+# Local screenshot runs and one-off verification scripts; they carry demo
+# credentials and machine-specific paths, so they must not be committed.
+/.shots/
+*.tmp.mjs

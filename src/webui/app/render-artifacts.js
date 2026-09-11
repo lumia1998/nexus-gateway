@@ -4,12 +4,35 @@ import { icons } from './icons.js'
 import { api } from './api.js'
 import { withBusy, toast } from './toast.js'
 import { openDrawer, openConfirmDrawer } from './drawer.js'
+import { copySecret } from './render-keys.js'
 
 import { formatDate, formatSize, kindLabel, shortId } from './format.js'
 
 import { setResults, setActions, setToolbar, announce, emptyState } from './render-shared.js'
 
 const KINDS = ['image', 'video', 'audio', 'file']
+
+const CODE_EXTS = new Set(['js','mjs','cjs','ts','tsx','jsx','py','rb','go','rs','java','c','h','cpp','css','scss','html','htm','sql','sh','bash','ps1','yaml','yml','xml','toml','ini','json'])
+const TEXT_EXTS = new Set(['txt','md','markdown','log','csv','tsv','conf','env','gitignore','dockerfile','json','yaml','yml','xml','toml','ini','sh','bash','ps1','js','mjs','cjs','ts','tsx','jsx','py','rb','go','rs','java','c','h','cpp','css','scss','html','htm','sql'])
+
+function artifactName(row) {
+  return (row.filename || row.name || row.id).toLowerCase()
+}
+
+function isCodeArtifact(row) {
+  const mt = (row.mediaType || '').toLowerCase()
+  if (mt === 'application/json' || mt === 'application/xml' || mt.endsWith('+json') || mt.endsWith('+xml')) return true
+  const ext = artifactName(row).split('.').pop() || ''
+  return CODE_EXTS.has(ext)
+}
+
+function isTextArtifact(row) {
+  const mt = (row.mediaType || '').toLowerCase()
+  if (mt.startsWith('text/')) return true
+  if (mt === 'application/json' || mt === 'application/xml' || mt.endsWith('+json') || mt.endsWith('+xml')) return true
+  const ext = artifactName(row).split('.').pop() || ''
+  return TEXT_EXTS.has(ext)
+}
 
 function artifactUrl(row) {
   return '/v1/admin/runs/' + encodeURIComponent(row.runId) + '/artifacts/' + encodeURIComponent(row.id)
@@ -19,12 +42,17 @@ export function findArtifact(artifactId, runId) {
   return state.artifacts.find((row) => row.id === artifactId && row.runId === runId)
 }
 
+function previewIcon(row) {
+  if (row.kind === 'image') return icons.image
+  if (row.kind === 'video') return icons.filePlay
+  if (row.kind === 'audio') return icons.fileAudio
+  if (isCodeArtifact(row)) return icons.fileCode
+  if (isTextArtifact(row)) return icons.fileText
+  return icons.file
+}
+
 function previewCell(row) {
-  if (row.kind === 'image' && row.downloadable) {
-    return '<button type="button" class="artifact-thumb-button" aria-label="查看产物详情" data-artifact-detail="' + escapeHtml(row.id) + '" data-artifact-run="' + escapeHtml(row.runId) + '"><img class="artifact-thumb" loading="lazy" src="' + artifactUrl(row) + '" alt=""></button>'
-  }
-  const icon = row.kind === 'video' ? icons.video : row.kind === 'audio' ? icons.audio : icons.file
-  return '<button type="button" class="artifact-tile" aria-label="查看产物详情" data-artifact-detail="' + escapeHtml(row.id) + '" data-artifact-run="' + escapeHtml(row.runId) + '">' + icon + '</button>'
+  return '<button type="button" class="artifact-tile" aria-label="查看产物详情" data-artifact-detail="' + escapeHtml(row.id) + '" data-artifact-run="' + escapeHtml(row.runId) + '">' + previewIcon(row) + '</button>'
 }
 
 function artifactRow(row) {
@@ -107,20 +135,48 @@ export function renderArtifacts() {
   announce(total + ' 个产物')
 }
 
+const TEXT_PREVIEW_LIMIT = 512 * 1024
+const TEXT_DISPLAY_LIMIT = 64 * 1024
+
 function previewMarkup(row) {
   const url = artifactUrl(row)
   if (row.kind === 'image' && row.downloadable) return '<img class="artifact-preview" src="' + url + '" alt="' + escapeHtml(row.name || row.filename || '产物') + '">'
   if (row.kind === 'video' && row.downloadable) return '<video class="artifact-preview" controls preload="metadata" src="' + url + '"></video>'
   if (row.kind === 'audio' && row.downloadable) return '<audio controls preload="metadata" src="' + url + '"></audio>'
+  if (row.kind === 'file' && row.downloadable && isTextArtifact(row)) {
+    return '<pre class="run-detail-code artifact-text-preview" data-text-preview>正在加载预览…</pre>'
+  }
   return '<p class="field-help">' + (row.downloadable ? '此类型不支持在线预览，可下载后查看。' : '该产物没有可下载的文件内容（' + escapeHtml(row.storageStatus || 'metadata_only') + '）。') + '</p>'
+}
+
+function loadTextPreview(row) {
+  const preview = drawerForm.querySelector('[data-text-preview]')
+  if (!preview) return
+  if (row.size != null && row.size > TEXT_PREVIEW_LIMIT) {
+    preview.textContent = '文件较大（' + formatSize(row.size) + '），未自动加载预览，可下载后查看。'
+    return
+  }
+  fetch(artifactUrl(row)).then((response) => {
+    if (!response.ok) throw new Error('HTTP ' + response.status)
+    return response.text()
+  }).then((text) => {
+    if (!preview.isConnected) return
+    preview.textContent = text.length > TEXT_DISPLAY_LIMIT
+      ? text.slice(0, TEXT_DISPLAY_LIMIT) + '\n\n…[预览已截断，请下载查看完整内容]'
+      : text
+  }).catch((error) => {
+    if (!preview.isConnected) return
+    preview.textContent = '预览加载失败：' + (error instanceof Error ? error.message : String(error))
+  })
 }
 
 export function openArtifactDetail(artifactId, runId) {
   const row = findArtifact(artifactId, runId)
   if (!row) { toast('产物不存在或已被删除', true); return }
   const title = row.name || row.filename || row.id
+  // 以当前访问地址为基准拼出完整文件链接，同源部署（127.0.0.1 / 服务器 IP / 反向代理域名）都自动正确
+  const fileUrl = row.downloadable ? new URL(artifactUrl(row), window.location.href).href : ''
   const body =
-    '<div class="artifact-preview-wrap">' + previewMarkup(row) + '</div>' +
     '<div class="run-detail-grid">' +
     [['name', '名称'], ['mediaType', '类型'], ['size', '大小'], ['createdAt', '保存时间'], ['agent', '来源智能体'], ['run', '运行 ID']]
       .map(([key, label]) => {
@@ -128,6 +184,10 @@ export function openArtifactDetail(artifactId, runId) {
         return '<div class="run-detail-item"><span>' + label + '</span><strong>' + escapeHtml(value) + '</strong></div>'
       }).join('') +
     '</div>' +
+    (fileUrl ?
+      '<div class="artifact-link-row"><span class="muted">文件链接</span><div class="artifact-link-line"><code><a href="' + escapeHtml(fileUrl) + '" target="_blank" rel="noopener">' + escapeHtml(fileUrl) + '</a></code>' +
+      '<button type="button" class="button small" data-artifact-copy-link>' + icons.copy + '复制</button></div></div>' : '') +
+    '<div class="artifact-preview-wrap">' + previewMarkup(row) + '</div>' +
     '<div class="run-detail-actions">' +
     (row.downloadable ? '<a class="button small" download href="' + artifactUrl(row) + '">下载</a>' : '') +
     '<button type="button" class="button small danger" data-artifact-delete="' + escapeHtml(row.id) + '" data-artifact-run="' + escapeHtml(row.runId) + '">删除产物</button>' +
@@ -135,6 +195,9 @@ export function openArtifactDetail(artifactId, runId) {
   openDrawer('产物详情', body, '', null)
   const remove = drawerForm.querySelector('[data-artifact-delete]')
   if (remove) remove.onclick = () => confirmArtifactDelete(remove.dataset.artifactDelete, remove.dataset.artifactRun)
+  const copyLink = drawerForm.querySelector('[data-artifact-copy-link]')
+  if (copyLink) copyLink.onclick = () => withBusy(copyLink, async () => { await copySecret(fileUrl, '请手动复制上方链接'); toast('文件链接已复制') })
+  loadTextPreview(row)
 }
 
 export function confirmArtifactDelete(artifactId, runId) {

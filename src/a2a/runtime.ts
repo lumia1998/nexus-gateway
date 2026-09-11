@@ -215,12 +215,15 @@ export class A2AClientRuntime implements AgentSessionRuntime {
         this.sink.setState('running')
         void previous.then(async () => {
             this.queuedResponse = false
-            if (
-                this.disposed ||
-                this.sink.state === 'canceled' ||
-                this.sink.state === 'failed' ||
-                (this.taskDeadlineAt !== undefined && this.taskDeadlineAt <= Date.now())
-            ) return
+            if (this.disposed || this.sink.state === 'canceled' || this.sink.state === 'failed') return
+            if (this.taskDeadlineAt !== undefined && this.taskDeadlineAt <= Date.now()) {
+                // The deadline elapsed while this reply queued behind the
+                // previous stream, so no prompt will ever run. Returning here
+                // would leave the session stuck at `running` — state was
+                // already set above — until its TTL expires.
+                this.sink.setState('failed', 'A2A task deadline elapsed before the reply was sent')
+                return
+            }
             await this.prompt(message, attachments, true)
         }).catch((error) => {
             if (!this.disposed && this.sink.state !== 'canceled') this.sink.setState('failed', errorMessage(error))

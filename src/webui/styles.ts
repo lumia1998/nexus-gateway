@@ -612,13 +612,7 @@ tr[data-run-detail] { cursor: pointer; }
 .artifact-table th:nth-child(4), .artifact-table th:nth-child(5) { width: 120px; }
 .artifact-table th:nth-child(6) { width: 180px; }
 .artifact-table td { height: 56px; }
-.artifact-thumb-button {
-  display: block; width: 44px; height: 44px;
-  padding: 0; border-radius: var(--radius);
-  overflow: hidden;
-}
-.artifact-thumb { display: block; width: 44px; height: 44px; object-fit: cover; border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--muted) / .4); }
-/* 非图片产物的类型图标瓦片 */
+/* 产物类型图标瓦片（默认不加载内容，点击后进详情抽屉预览） */
 .artifact-tile {
   display: grid; place-items: center;
   width: 44px; height: 44px;
@@ -630,9 +624,17 @@ tr[data-run-detail] { cursor: pointer; }
 }
 .artifact-tile:hover { background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }
 .artifact-tile svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.artifact-tile svg.filled { fill: currentColor; stroke: none; }
 .artifact-preview-wrap { display: grid; justify-items: center; gap: var(--sp-2); margin-bottom: var(--sp-4); }
+.artifact-link-row { display: grid; gap: var(--sp-1); margin-bottom: var(--sp-4); }
+.artifact-link-line { display: flex; align-items: center; gap: var(--sp-2); }
+.artifact-link-line code { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.artifact-link-line code a { color: hsl(var(--foreground)); text-decoration: underline; text-underline-offset: 2px; }
+.artifact-link-line code a:hover { color: hsl(var(--accent-foreground)); }
+.artifact-link-line .button { flex-shrink: 0; }
 .artifact-preview { max-width: 100%; max-height: 320px; border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--muted) / .4); }
 .artifact-preview-wrap audio { width: 100%; }
+.artifact-text-preview { width: 100%; max-height: 480px; }
 
 /* ── Drawer ───────────────────────────────────────────────────────── */
 .drawer-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / .4); z-index: var(--z-backdrop); animation: fadeIn var(--duration-fade) var(--ease-out); }
@@ -675,12 +677,9 @@ tr[data-run-detail] { cursor: pointer; }
 .main.settings-page .page-actions { position: absolute; right: max(var(--gutter), calc((100% - 820px) / 2)); }
 .main.settings-page .page-content { padding-top: var(--sp-8); }
 .settings-layout { width: min(100%, 820px); margin-inline: auto; }
+/* 设置页顶层布局块之间用分隔线（每节各自包在 .settings-layout 里） */
+.settings-layout + .settings-layout { margin-top: 48px; padding-top: 48px; border-top: 1px solid hsl(var(--border)); }
 .settings-section { width: 100%; }
-.settings-section + .settings-section {
-  margin-top: 48px;
-  padding-top: 48px;
-  border-top: 1px solid hsl(var(--border));
-}
 .settings-section-heading { display: grid; gap: var(--sp-2); margin-bottom: 28px; }
 .settings-section-heading h2 { font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.01em; }
 /* 节说明写的是生效范围——这是界面自身无法表达的信息，不要当复述删掉 */
@@ -690,16 +689,6 @@ tr[data-run-detail] { cursor: pointer; }
 .settings-fields .field input, .settings-fields .field select { max-width: none; }
 .settings-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 28px; }
 .settings-form-error { width: min(100%, 520px); margin-top: 32px; }
-.settings-account-row {
-  display: grid;
-  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
-  align-items: start;
-  gap: 32px;
-}
-.settings-account-copy { display: grid; gap: var(--sp-1); }
-.settings-account-copy strong { font-size: var(--fs-sm); font-weight: 600; }
-.settings-account-copy p { color: hsl(var(--muted-foreground)); font-size: var(--fs-sm); }
-.settings-account-fields { display: grid; gap: 24px; width: min(100%, 520px); }
 
 /* ── Toast ────────────────────────────────────────────────────────── */
 .toast-region {
@@ -773,9 +762,8 @@ tr[data-run-detail] { cursor: pointer; }
 @media (max-width: 640px) {
   .page-content { padding: var(--sp-4) var(--gutter) var(--sp-4); }
   .main.settings-page .page-content { padding-top: var(--sp-6); }
-  .settings-section + .settings-section { margin-top: 40px; padding-top: 40px; }
+  .settings-layout + .settings-layout { margin-top: 40px; padding-top: 40px; }
   .settings-section-heading { margin-bottom: 24px; }
-  .settings-account-row { grid-template-columns: 1fr; gap: var(--sp-4); }
   .search-box { max-width: none; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .run-detail-grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
