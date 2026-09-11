@@ -2,12 +2,16 @@ import { spawn, type ChildProcess } from 'node:child_process'
 
 const DEFAULT_GRACE_MS = 2_000
 const FORCE_KILL_WAIT_MS = 1_000
-// Enumerating costs about a second on an idle machine and considerably more
-// when the gateway is busy. The sweep runs on every teardown — including a
-// failed ACP startup, which callers bound at five seconds — so it is capped
-// short: an incomplete sweep beats a teardown that never returns.
-const PROCESS_TABLE_TIMEOUT_MS = 1_200
+// Enumerating the process table costs about 1.3s on an idle machine (roughly
+// 0.4s of PowerShell startup plus the CIM query) and more when the gateway is
+// busy. The previous 1.2s cap sat just below that, so the sweep timed out and
+// silently found nothing; leave headroom for the query to actually finish.
+const PROCESS_TABLE_TIMEOUT_MS = 2_500
 const PROCESS_TABLE_TTL_MS = 1_000
+// Ceiling for one orphan sweep. The sweep runs on every teardown — including a
+// failed ACP startup, which callers bound at five seconds — so it must stay
+// bounded: an incomplete sweep beats a teardown that never returns.
+const ORPHAN_SWEEP_BUDGET_MS = 3_000
 // Windows reports a killed process as gone from `tasklist` slightly before the
 // kernel closes the handles it held, so callers that delete the workspace or
 // temp directory right after a teardown can still see EBUSY.
@@ -28,6 +32,11 @@ export async function terminateProcessTree(
         // never handle: the graceful pass always fails and burns the whole
         // grace period before the forced retry. Force the tree kill directly.
         if (!hasExited(child)) {
+            // Enumerating the process table is the slowest step of a Windows
+            // teardown and does not depend on the leader being gone, so start
+            // it alongside the kill instead of after it. The snapshot then
+            // predates the tree kill, which the liveness filter below handles.
+            const table = windowsProcessTable()
             await taskkill(pid, true)
             if (!(await waitForExit(child, Math.max(graceMs, FORCE_KILL_WAIT_MS)))) {
                 // A forced kill can still lose the race on a loaded machine,
@@ -35,13 +44,16 @@ export async function terminateProcessTree(
                 await taskkill(pid, true)
                 await waitForExit(child, FORCE_KILL_WAIT_MS)
             }
+            // A forced `taskkill /T` walks the tree as it exists at that
+            // instant, so a child spawned moments before the leader died
+            // survives as an orphan holding ports, file locks and inherited
+            // pipes. Sweep by parent id for whatever the tree kill missed.
+            await terminateOrphanedDescendants(pid, ORPHAN_SWEEP_BUDGET_MS, table)
+        } else {
+            // A leader that exited before we got here cannot be addressed by
+            // taskkill at all, so nothing has swept its descendants yet.
+            await terminateOrphanedDescendants(pid)
         }
-        // A forced `taskkill /T` walks the tree as it exists at that instant,
-        // so a child spawned moments before the leader died survives as an
-        // orphan holding ports, file locks and inherited pipes — and a leader
-        // that exited before we got here cannot be addressed by taskkill at
-        // all. Sweep by parent id in both cases.
-        await terminateOrphanedDescendants(pid)
         if (hasExited(child)) {
             await delay(PROCESS_EXIT_SETTLE_MS)
             return
@@ -114,24 +126,33 @@ function waitForExit(child: ChildProcess, timeoutMs: number) {
 }
 
 function taskkill(pid: number, force: boolean) {
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
         const args = ['/PID', String(pid), '/T']
         if (force) args.push('/F')
-        const killer = spawn(
-            'taskkill.exe',
-            args,
-            { stdio: 'ignore', windowsHide: true }
-        )
-        const timer = setTimeout(() => {
-            killer.kill()
-            resolve()
-        }, FORCE_KILL_WAIT_MS)
-        const finish = () => {
-            clearTimeout(timer)
-            resolve()
+        let killer: ChildProcess
+        try {
+            killer = spawn(
+                'taskkill.exe',
+                args,
+                { stdio: 'ignore', windowsHide: true }
+            )
+        } catch {
+            resolve(false)
+            return
         }
-        killer.once('error', finish)
-        killer.once('exit', finish)
+        let settled = false
+        const finish = (killed: boolean) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(killed)
+        }
+        const timer = setTimeout(() => {
+            try { killer.kill() } catch {}
+            finish(false)
+        }, FORCE_KILL_WAIT_MS)
+        killer.once('error', () => finish(false))
+        killer.once('exit', (code) => finish(code === 0))
     })
 }
 
@@ -143,13 +164,38 @@ function taskkill(pid: number, force: boolean) {
  * after that, which is enough to find the survivors. Best-effort by design: an
  * unreadable process table just leaves the sweep incomplete.
  */
-async function terminateOrphanedDescendants(pid: number) {
-    const doomed = collectDescendants(await windowsProcessTable(), pid)
+async function terminateOrphanedDescendants(
+    pid: number,
+    budgetMs = ORPHAN_SWEEP_BUDGET_MS,
+    table?: Promise<Map<number, number[]> | undefined>
+) {
+    const deadline = Date.now() + budgetMs
+    const snapshot = await (table ?? windowsProcessTable())
+    // The snapshot may predate a caller's tree kill, and each taskkill costs
+    // the better part of a second, so only ever aim at processes still alive.
+    const doomed = collectDescendants(snapshot, pid).filter((target) => processAlive(target))
     if (!doomed.length) return
-    for (const target of doomed) await taskkill(target, true)
-    // Killing a parent can strand its own children, so rescan for what is left.
+    // `collectDescendants` already returns the whole descendant tree, so kill
+    // them together rather than paying the taskkill cost once per process.
+    await Promise.all(doomed.map((target) => taskkill(target, true)))
+    // Killing a parent can strand its own children, but the first pass covered
+    // the entire tree, so a rescan only pays off when one of the targets is
+    // still alive. Each rescan costs another full enumeration.
+    if (Date.now() >= deadline) return
+    if (!doomed.some((target) => processAlive(target))) return
     const remaining = collectDescendants(await windowsProcessTable(true), pid)
-    for (const survivor of remaining) await taskkill(survivor, true)
+        .filter((survivor) => processAlive(survivor))
+    await Promise.all(remaining.map((survivor) => taskkill(survivor, true)))
+}
+
+function processAlive(pid: number) {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (error) {
+        // EPERM means the process exists but belongs to someone else.
+        return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
 }
 
 function collectDescendants(table: Map<number, number[]> | undefined, root: number) {

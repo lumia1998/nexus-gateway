@@ -1,6 +1,6 @@
 {
   "name": "nexus-agentd",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local Nexus Gateway daemon with an HTTP/SSE API and WebUI for allowlisted ACP and remote A2A agents",
   "type": "module",
   "main": "dist/index.js",
