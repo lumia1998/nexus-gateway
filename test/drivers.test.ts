@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { loadAgentdConfig } from '../src/config.js'
 import { createDriverRegistry } from '../src/drivers/index.js'
-import { createStdioAcpDriver, probeCommand } from '../src/drivers/stdio.js'
+import { createStdioAcpDriver, probeCommand, DEFAULT_PROBE_TIMEOUT_MS } from '../src/drivers/stdio.js'
 import { AcpProcessRuntime } from '../src/acp/runtime.js'
 import { ManagedSession } from '../src/session.js'
 import type { AgentdConfig, AgentdDriverConfig } from '../src/types.js'
@@ -57,6 +57,35 @@ test('probes configured ACP commands without depending on installed agents', asy
     )
     assert.equal(results.every((result) => result.ready), true)
     assert.equal(results.every((result) => Boolean(result.version)), true)
+})
+
+test('probe budget defaults to 60s and honours a per-agent probeTimeoutMs', async () => {
+    assert.equal(DEFAULT_PROBE_TIMEOUT_MS, 60_000)
+    const slow = path.join(process.cwd(), 'test', 'fixtures', 'probe-slow.mjs')
+    const defaults = {
+        name: 'Hermes Agent',
+        description: 'Slow probe test driver',
+        command: process.execPath,
+        args: ['acp'],
+        probeArgs: [slow, '1200']
+    }
+
+    // A budget below the agent's startup time still reports a timeout...
+    const timedOut = await createStdioAcpDriver(
+        'hermes',
+        { driver: 'hermes', probeTimeoutMs: 250 },
+        defaults
+    ).probe()
+    assert.equal(timedOut.ready, false)
+    assert.match(String(timedOut.error), /probe timed out/)
+
+    // ...and a longer one lets the very same agent report itself as ready.
+    const ready = await createStdioAcpDriver(
+        'hermes',
+        { driver: 'hermes', probeTimeoutMs: 8000 },
+        defaults
+    ).probe()
+    assert.equal(ready.ready, true)
 })
 
 test('loads every supported ACP driver kind and rejects unknown drivers', async () => {

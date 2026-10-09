@@ -170,7 +170,7 @@ export function clampTimeout(value: number | undefined, fallback: number, min: n
 
 export function preservedAcpAdvanced(previous: Record<string, unknown>) {
     const result: Record<string, unknown> = {}
-    for (const key of ['command', 'args', 'probeArgs', 'inheritEnv', 'env']) {
+    for (const key of ['command', 'args', 'probeArgs', 'probeTimeoutMs', 'inheritEnv', 'env']) {
         if (previous[key] !== undefined) result[key] = structuredClone(previous[key])
     }
     return result

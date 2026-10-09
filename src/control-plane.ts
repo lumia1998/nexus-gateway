@@ -544,7 +544,8 @@ export class AgentdControlPlane {
             enabled: config.enabled !== false,
             workspace: config.workspace || this.config.workspaceRoots[0] || '',
             permissionPolicy: config.permissionPolicy || 'ask',
-            permissionTimeoutMs: config.permissionTimeoutMs || 15 * 60 * 1000
+            permissionTimeoutMs: config.permissionTimeoutMs || 15 * 60 * 1000,
+            probeTimeoutMs: config.probeTimeoutMs || 60 * 1000
         }
     }
 

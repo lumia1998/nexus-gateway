@@ -52,6 +52,12 @@ export interface AgentdDriverConfig {
     args?: string[]
     /** Arguments used by a command availability probe. */
     probeArgs?: string[]
+    /**
+     * Milliseconds the availability probe may take before it is reported as a
+     * timeout. Agent CLIs that load plugins before answering a probe need far
+     * more than a shell command; defaults to 60000.
+     */
+    probeTimeoutMs?: number
     inheritEnv?: string[]
     env?: Record<string, string>
     permissionPolicy?: PermissionPolicy
@@ -165,6 +171,7 @@ export interface AgentdAgentConfigView {
     workspace?: string
     permissionPolicy?: PermissionPolicy
     permissionTimeoutMs?: number
+    probeTimeoutMs?: number
     agentCardUrl?: string
     agentUrl?: string
     preferredTransport?: A2ATransportPreference

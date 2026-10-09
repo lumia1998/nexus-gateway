@@ -118,10 +118,15 @@ npm install -g \
   pi-acp
 ```
 
-`command`、`args`、`probeArgs`、`inheritEnv` 和 `env` 是仅可在本机配置文件修改的高级字段，WebUI
+`command`、`args`、`probeArgs`、`probeTimeoutMs`、`inheritEnv` 和 `env` 是仅可在本机配置文件修改的高级字段，WebUI
 不接受这些字段。Workspace 在启动进程前经过 `realpath` 边界校验。通用 `stdio` 驱动用于自定义入口，
 必须指定 `command`，用 `probeArgs` 指定可用性检查参数（例如 `["--version"]`）；编辑其他字段时保留
 这些本地配置。命令探测不等于 ACP 握手成功。
+
+`probeTimeoutMs` 是可用性探测的期限，默认 60000 毫秒。探测会真正拉起一次 Agent 进程，而 Agent 在
+应答探测前往往要加载大量插件（例如 Hermes 会注册 50 多个插件提供者），启动耗时远超普通 shell
+命令；期限过短会把正在正常启动的 Agent 报成「不可用 / probe timed out」。启动较慢的 Agent 按实测
+启动时间调高该值即可。
 
 权限策略支持 `ask`（询问）、`allow`（自动允许单次）和 `deny`（拒绝）。`allow` 只选择 Agent 提供的
 `allow_once`，缺少该选项则取消授权，不回退到永久授权。`ask` 模式下普通 `action: "accept"` 也只选择

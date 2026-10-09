@@ -35,6 +35,15 @@ const BASE_ENV_KEYS = [
     'PATHEXT'
 ]
 
+/**
+ * How long an availability probe may take before it is reported as a timeout.
+ * Probes spawn a real agent process, and agents that load plugins before
+ * answering (Hermes registers 50+ plugin providers) need far longer than the
+ * five seconds that used to be hard-coded here — they were reported as down
+ * while starting up normally. Override per agent with `probeTimeoutMs`.
+ */
+export const DEFAULT_PROBE_TIMEOUT_MS = 60_000
+
 export interface StdioAcpDriverDefaults {
     name: string
     description: string
@@ -71,7 +80,10 @@ export function createStdioAcpDriver(
                     config.probeArgs || defaults.probeArgs || ['--version'],
                     env,
                     name,
-                    { ownsProcessGroup: process.platform !== 'win32' }
+                    {
+                        ownsProcessGroup: process.platform !== 'win32',
+                        timeoutMs: config.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
+                    }
                 )
                 return {
                     id,
@@ -193,7 +205,7 @@ export function probeCommand(
                     `${label} probe timed out; cleanup failed: ${cleanupFailure(error)}`
                 ))
             )
-        }, options.timeoutMs ?? 5000)
+        }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS)
         timer.unref?.()
         child.stdout.on('data', (chunk) => {
             output = `${output}${String(chunk)}`.slice(-8192)

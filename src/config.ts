@@ -279,6 +279,13 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
             input.probeArgs === undefined
                 ? undefined
                 : stringArray(input.probeArgs, `agents.${id}.probeArgs`),
+        probeTimeoutMs: integerValue(
+            input.probeTimeoutMs,
+            `agents.${id}.probeTimeoutMs`,
+            60 * 1000,
+            1000,
+            10 * 60 * 1000
+        ),
         inheritEnv:
             input.inheritEnv === undefined
                 ? undefined
