@@ -60,10 +60,15 @@ export interface ContainedFile {
 /**
  * Reads a file that must resolve inside one of `roots`.
  *
- * `roots` must already be realpath'd absolute paths; `WorkspacePolicy.listRoots()`
- * satisfies this. A caller that passes an unresolved root fails closed, because
- * containment is checked against a realpath'd target. `requested` may be absolute
- * (an agent-declared path) or relative to `roots[0]` (a client-supplied path).
+ * `roots` must be the canonical paths the caller decided to trust — not the
+ * result of a fresh `realpath()` of that same path. Re-resolving a root at call
+ * time hands the containment decision back to the file system, so a link
+ * planted after the decision (for example a workspace swapped for a junction)
+ * would move the trust boundary with it. `WorkspacePolicy.listRoots()` and a
+ * session's own canonical workspace both satisfy this. An unresolved root fails
+ * closed, because containment is checked against a realpath'd target.
+ * `requested` may be absolute (an agent-declared path) or relative to `roots[0]`
+ * (a client-supplied path).
  */
 export async function readContainedFile(
     roots: readonly string[],

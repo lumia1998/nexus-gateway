@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime } from './a2a/runtime.js'
@@ -295,8 +294,12 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 
     private async publishSingleFile(requestedPath: string) {
         try {
-            const workspaceRoot = await realpath(this.workspace!)
-            const file = await readContainedFile([workspaceRoot], requestedPath, {
+            // `this.workspace` is the canonical path the session was created
+            // with, already resolved through the workspace policy. Resolving it
+            // again here would hand the trust decision back to the file system,
+            // so a workspace replaced by a link after creation would silently
+            // become the new root and publish would read outside the allowlist.
+            const file = await readContainedFile([this.workspace!], requestedPath, {
                 maxBytes: MAX_PUBLISHED_FILE_BYTES
             })
             const artifact: AgentdArtifact = {
