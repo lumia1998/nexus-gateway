@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import http from 'node:http'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import type { AddressInfo } from 'node:net'
@@ -29,7 +29,7 @@ function wire(url: string, body?: unknown, headers: Record<string, string> = {})
 }
 
 async function fixture(extra = {}) {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-hardening-'))
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-hardening-'))
     const file = path.join(directory, 'config.json')
     await writeFile(file, JSON.stringify({ initialized: false, workspaceRoots: [directory], agents: {}, ...extra }))
     const config = await loadAgentdConfig(file)
