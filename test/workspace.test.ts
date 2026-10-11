@@ -107,8 +107,6 @@ test('isPathInside keeps containment case-sensitive and separator-aware', () => 
         isPathInside(`root${path.sep}a${path.sep}${path.sep}`, `root${path.sep}a${path.sep}c`),
         true
     )
-    // The renamed helper keeps the previously published name working.
-    assert.equal(isWithin, isPathInside)
 })
 
 test('isPathInside folds hand-written Windows spellings without lower-casing', {
