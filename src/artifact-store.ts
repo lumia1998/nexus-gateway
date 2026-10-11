@@ -14,6 +14,7 @@ import {
 import { performance } from 'node:perf_hooks'
 import path from 'node:path'
 import type { AgentdArtifact, AgentdRunArtifactView } from './types.js'
+import { isPathInside } from './workspace.js'
 
 /**
  * The value is persisted with run metadata so callers can distinguish a
@@ -514,7 +515,7 @@ export class ArtifactStore {
             await this.ensureDirectory(runDir, false)
             const runReal = await this.realDirectory(runDir)
             const fileReal = await this.realPath(entry.filePath)
-            if (!isContained(runReal, fileReal)) return undefined
+            if (!isPathInside(runReal, fileReal)) return undefined
             const stat = await this.io.lstat(entry.filePath)
             if (!stat.isFile() || stat.isSymbolicLink()) return undefined
             const bytes = await this.readRegularFile(entry.filePath, this.maxArtifactBytes)
@@ -719,7 +720,7 @@ export class ArtifactStore {
         await this.io.mkdir(runDir, { recursive: true, mode: 0o700 })
         await this.ensureDirectory(runDir, false)
         const runReal = await this.realDirectory(runDir)
-        if (!isContained(await this.realDirectory(this.rootDir), runReal)) {
+        if (!isPathInside(await this.realDirectory(this.rootDir), runReal)) {
             throw new Error('Artifact run directory escaped the artifact root')
         }
         const filePath = this.payloadPath(item.runId, item.id)
@@ -728,7 +729,7 @@ export class ArtifactStore {
         // while runReal was resolved through realDirectory(). Compare the payload
         // with the same canonical directory instead of the raw string.
         const fileRealParent = await this.realDirectory(path.dirname(filePath))
-        if (!isContained(runReal, fileRealParent)) throw new Error('Invalid artifact payload path')
+        if (!isPathInside(runReal, fileRealParent)) throw new Error('Invalid artifact payload path')
         const delta = item.bytes.length - (entry.bytes || 0)
         const previousView = entry.durableView
         const previousPath = entry.filePath
@@ -1317,11 +1318,6 @@ function nonNegativeInteger(value: number | undefined, fallback: number) {
 
 function nonNegativeNumber(value: number | undefined, fallback: number) {
     return Number.isFinite(value) && Number(value) >= 0 ? Number(value) : fallback
-}
-
-function isContained(root: string, target: string) {
-    const relative = path.relative(root, target)
-    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 function isMissing(error: unknown) {

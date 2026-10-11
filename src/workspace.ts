@@ -14,7 +14,7 @@ export class WorkspacePolicy {
     async resolve(input: string) {
         if (!input?.trim()) throw new Error('workspace is required')
         const candidate = normalize(await realpath(input))
-        const allowed = this.roots.some((root) => isWithin(root, candidate))
+        const allowed = this.roots.some((root) => isPathInside(root, candidate))
         if (!allowed) throw new Error(`workspace is outside the configured allowlist: ${input}`)
         return candidate
     }
@@ -24,15 +24,34 @@ export class WorkspacePolicy {
     }
 }
 
-export function isWithin(root: string, candidate: string) {
-    const relative = path.relative(root, candidate)
-    return (
-        relative === '' ||
-        (!relative.startsWith(`..${path.sep}`) &&
-            relative !== '..' &&
-            !path.isAbsolute(relative))
-    )
+/**
+ * Reports whether `target` is `root` itself or lives below it.
+ *
+ * Both arguments must already be canonical (realpath'd) absolute paths.
+ * `realpath` returns the spelling stored on disk, so on a normal
+ * case-insensitive volume two differently-cased spellings of one directory still
+ * compare equal here. A prefix comparison is used rather than `path.relative`,
+ * whose win32 implementation lower-cases both sides and would therefore read a
+ * case-variant sibling inside a case-sensitive directory as contained. The
+ * separator is required so that `\\server\share2` is not read as living inside
+ * `\\server\share`.
+ *
+ * `path.resolve` only folds lexical noise (`.`, `..`, duplicate separators) for
+ * callers that hand over a hand-written path, which the previous
+ * `path.relative` implementation also tolerated. It must never be replaced with
+ * `realpath`: resolving against the file system here would hand the trust
+ * decision back to whatever the directory currently points at.
+ */
+export function isPathInside(root: string, target: string) {
+    const base = path.resolve(root)
+    const candidate = path.resolve(target)
+    if (candidate === base) return true
+    const prefix = base.endsWith(path.sep) ? base : base + path.sep
+    return candidate.startsWith(prefix)
 }
+
+/** @deprecated Use {@link isPathInside}. Kept because this module is re-exported. */
+export const isWithin: typeof isPathInside = isPathInside
 
 export type ContainedReadFailure = 'outside' | 'swapped' | 'not-a-file' | 'too-large'
 
@@ -80,7 +99,7 @@ export async function readContainedFile(
     }
     const unresolved = path.resolve(roots[0], requested)
     const target = await realpath(unresolved)
-    const root = roots.find((candidate) => isWithin(candidate, target))
+    const root = roots.find((candidate) => isPathInside(candidate, target))
     if (!root) throw outsideError(requested)
 
     let handle: Awaited<ReturnType<typeof open>> | undefined
@@ -89,7 +108,7 @@ export async function readContainedFile(
         // Resolve again after opening so a swapped symlink cannot silently
         // redirect the read outside the allowlist.
         const verified = await realpath(unresolved)
-        if (!isWithin(root, verified)) throw outsideError(requested)
+        if (!isPathInside(root, verified)) throw outsideError(requested)
         if (verified !== target) {
             throw new ContainedReadError('swapped', 'file changed while it was being opened')
         }
