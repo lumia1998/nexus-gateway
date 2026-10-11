@@ -108,6 +108,23 @@ Agent 的编辑页单独设置，默认 60 秒、最大 30 分钟。
 | `pi` | `pi-acp` |
 | `openclaw` | `openclaw acp` |
 | `hermes` | `hermes acp` |
+| `dsh` | `dsh --profile acp` |
+| `grok` | `grok --no-auto-update agent stdio` |
+
+`dsh` 与 `grok` 使用各自 CLI 自带的 ACP 入口，不需要 Adapter。
+
+`dsh`（DeepSeek Harness）默认执行 `dsh --profile acp`，要求 `dsh` 在 PATH 上。DeepSeek Harness
+桌面版把启动器放在 `<安装目录>\resources\runtime\cli\bin\dsh.cmd`，但不会自动出现在已运行进程的
+PATH 里；两种接法二选一：把该目录加入用户 PATH（桌面版的命令管理功能会写 HKCU 用户环境变量，新开的
+进程才看得到），或在本机配置里用 `command` 覆盖成绝对路径，例如
+`"command": "D:/DeepSeek/resources/runtime/cli/bin/dsh.cmd"`。
+
+`grok`（Grok Build）默认执行 `grok --no-auto-update agent stdio`；`--no-auto-update` 用于跳过
+自动化环境中的后台更新检查，可用本机配置的 `args` 覆盖。前置条件是 CLI 已完成认证，三选一：先跑
+`grok login` 缓存 token、用 `"inheritEnv": ["XAI_API_KEY"]` 把守护进程环境里的变量透传给 grok
+子进程、或用 `"env": { "XAI_API_KEY": "env:XAI_API_KEY" }` 显式赋值（`env:` 前缀从守护进程环境
+取值，变量缺失时配置加载直接报错）。Gateway 的 ACP 客户端不做 `authenticate` 请求，未认证时 grok
+会在握手后失败。DSH 是本地 agent，没有这个前置条件。
 
 Claude Code、Codex、Pi 通常需要对应 Adapter：
 

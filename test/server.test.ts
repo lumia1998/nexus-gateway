@@ -178,7 +178,17 @@ test('Console Cookie and client API Keys are separate, with upgrade-safe bootstr
             ((await runtimeResponse.json()) as Record<string, unknown>),
             {
                 workspaceRoots: [fixture.directory],
-            driverKinds: ['stdio', 'opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes'],
+            driverKinds: [
+                'stdio',
+                'opencode',
+                'claude',
+                'codex',
+                'pi',
+                'openclaw',
+                'hermes',
+                'dsh',
+                'grok'
+            ],
                 sessionTtlMs: 48 * 60 * 60 * 1000,
                 promptTimeoutMs: 20 * 60 * 1000,
                 cleanupIntervalMs: 30_000,

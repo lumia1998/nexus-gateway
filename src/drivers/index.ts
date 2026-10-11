@@ -1,6 +1,8 @@
 import type { AgentdConfig } from '../types.js'
 import { createClaudeDriver } from './claude.js'
 import { createCodexDriver } from './codex.js'
+import { createDshDriver } from './dsh.js'
+import { createGrokDriver } from './grok.js'
 import { createHermesDriver } from './hermes.js'
 import { createOpenCodeDriver } from './opencode.js'
 import { createOpenClawDriver } from './openclaw.js'
@@ -41,6 +43,12 @@ export function createDriverRegistry(config: AgentdConfig) {
                 break
             case 'hermes':
                 drivers.set(id, createHermesDriver(id, driver))
+                break
+            case 'dsh':
+                drivers.set(id, createDshDriver(id, driver))
+                break
+            case 'grok':
+                drivers.set(id, createGrokDriver(id, driver))
                 break
         }
     }

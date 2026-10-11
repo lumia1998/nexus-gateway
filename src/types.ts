@@ -36,7 +36,9 @@ export const agentdDriverKinds = [
     'codex',
     'pi',
     'openclaw',
-    'hermes'
+    'hermes',
+    'dsh',
+    'grok'
 ] as const
 
 export type AgentdDriverKind = (typeof agentdDriverKinds)[number]
