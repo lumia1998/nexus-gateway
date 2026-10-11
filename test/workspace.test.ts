@@ -9,6 +9,7 @@ import {
     ContainedReadError,
     WorkspacePolicy,
     isPathInside,
+    isWithin,
     readContainedFile
 } from '../src/workspace.js'
 
@@ -44,10 +45,15 @@ test('workspace policy rejects a case-variant sibling inside a case-sensitive di
         t.skip('case-sensitive directories are a Windows feature')
         return
     }
+    // The fixture must stay under the canonical temp root: fsutil rejects the
+    // case-sensitive attribute inside some managed trees (for example the DSH
+    // workspace) with Access denied, and that is a bug in this test rather than
+    // a missing host capability.
     const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-case-'))
     try {
-        if (!(await enableCaseSensitivity(directory))) {
-            t.skip('case-sensitive directories are unavailable on this host')
+        const probe = await enableCaseSensitivity(directory)
+        if (!probe.enabled) {
+            t.skip(probe.reason)
             return
         }
         const root = path.join(directory, 'repo')
@@ -56,12 +62,13 @@ test('workspace policy rejects a case-variant sibling inside a case-sensitive di
         await mkdir(root)
         await mkdir(secret, { recursive: true })
         await writeFile(path.join(secret, 'credentials.txt'), 'host-credential')
-        // Only case separates the two, and realpath keeps the spelling stored
-        // on disk, so on a case-sensitive directory they are distinct.
-        if ((await realpath(root)) === (await realpath(sibling))) {
-            t.skip('the directory did not become case-sensitive')
-            return
-        }
+        // The queried attribute is authoritative, so anything but two distinct
+        // directories means the fixture is broken, not that the host is limited.
+        assert.notEqual(
+            await realpath(root),
+            await realpath(sibling),
+            'the directory reports as case-sensitive but resolves both spellings to one directory'
+        )
 
         const policy = await WorkspacePolicy.create([root])
         assert.equal(await policy.resolve(root), normalize(await realpath(root)))
@@ -86,6 +93,22 @@ test('isPathInside keeps containment case-sensitive and separator-aware', () => 
     assert.equal(isPathInside(root, `root${path.sep}repo2`), false)
     assert.equal(isPathInside(root, `root${path.sep}repo2${path.sep}child`), false)
     assert.equal(isPathInside(`root${path.sep}`, `root${path.sep}anything`), true)
+    // Lexical noise in a hand-written path is folded before comparing, which the
+    // previous path.relative implementation also tolerated.
+    assert.equal(
+        isPathInside(`root${path.sep}a`, `root${path.sep}a${path.sep}..${path.sep}b`),
+        false
+    )
+    assert.equal(
+        isPathInside(`root${path.sep}a`, `root${path.sep}a${path.sep}.${path.sep}c`),
+        true
+    )
+    assert.equal(
+        isPathInside(`root${path.sep}a${path.sep}${path.sep}`, `root${path.sep}a${path.sep}c`),
+        true
+    )
+    // The renamed helper keeps the previously published name working.
+    assert.equal(isWithin, isPathInside)
 })
 
 test('workspace policy admits a root spelled with different case on a case-insensitive volume', {
@@ -228,22 +251,57 @@ function normalize(value: string) {
     return path.resolve(value)
 }
 
+type CaseSensitivityProbe = { enabled: true } | { enabled: false; reason: string }
+
 /**
- * Turns on per-directory case sensitivity. `fsutil` only accepts an empty
- * directory, so callers must enable it before creating the case-variant entries.
+ * Turns on per-directory case sensitivity for `directory`.
+ *
+ * Only a genuine host limitation produces a skip reason, and the
+ * `queryCaseSensitiveInfo` output decides that rather than the exit code of the
+ * command that enables the attribute. A fixture outside the canonical temp root
+ * is a bug in this test, so it throws instead of skipping. `fsutil` only accepts
+ * an empty directory, so callers must enable the attribute before creating the
+ * case-variant entries.
  */
-async function enableCaseSensitivity(directory: string) {
+async function enableCaseSensitivity(directory: string): Promise<CaseSensitivityProbe> {
+    const tempRoot = await realpath(os.tmpdir())
+    assert.equal(
+        isPathInside(tempRoot, directory),
+        true,
+        `case-sensitive fixtures must live under ${tempRoot}, not ${directory}`
+    )
+    let enableError = ''
     try {
         await execFileAsync(fsutil, ['file', 'setCaseSensitiveInfo', directory, 'enable'])
-        const { stdout } = await execFileAsync(fsutil, [
-            'file',
-            'queryCaseSensitiveInfo',
-            directory
-        ])
-        return /is enabled/i.test(stdout)
-    } catch {
-        return false
+    } catch (error) {
+        enableError = describeCommandError(error)
     }
+    let state = ''
+    try {
+        state = (
+            await execFileAsync(fsutil, ['file', 'queryCaseSensitiveInfo', directory])
+        ).stdout
+    } catch (error) {
+        return {
+            enabled: false,
+            reason: `case-sensitive directories are unavailable: ${describeCommandError(error)}`
+        }
+    }
+    if (/is enabled/i.test(state)) return { enabled: true }
+    return {
+        enabled: false,
+        reason:
+            `case sensitivity could not be enabled for ${directory}: ${state.trim()}` +
+            (enableError ? ` (setCaseSensitiveInfo: ${enableError})` : '')
+    }
+}
+
+function describeCommandError(error: unknown) {
+    const details = error as { message?: string; stderr?: string; stdout?: string }
+    return [details?.message, details?.stderr, details?.stdout]
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)
+        .join(' ')
 }
 
 async function disableCaseSensitivity(directory: string) {

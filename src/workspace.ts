@@ -35,12 +35,23 @@ export class WorkspacePolicy {
  * case-variant sibling inside a case-sensitive directory as contained. The
  * separator is required so that `\\server\share2` is not read as living inside
  * `\\server\share`.
+ *
+ * `path.resolve` only folds lexical noise (`.`, `..`, duplicate separators) for
+ * callers that hand over a hand-written path, which the previous
+ * `path.relative` implementation also tolerated. It must never be replaced with
+ * `realpath`: resolving against the file system here would hand the trust
+ * decision back to whatever the directory currently points at.
  */
 export function isPathInside(root: string, target: string) {
-    if (target === root) return true
-    const prefix = root.endsWith(path.sep) ? root : root + path.sep
-    return target.startsWith(prefix)
+    const base = path.resolve(root)
+    const candidate = path.resolve(target)
+    if (candidate === base) return true
+    const prefix = base.endsWith(path.sep) ? base : base + path.sep
+    return candidate.startsWith(prefix)
 }
+
+/** @deprecated Use {@link isPathInside}. Kept because this module is re-exported. */
+export const isWithin: typeof isPathInside = isPathInside
 
 export type ContainedReadFailure = 'outside' | 'swapped' | 'not-a-file' | 'too-large'
 
