@@ -102,6 +102,11 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         state: AgentdSessionState
     ) => void
 
+    /**
+     * `workspace` must be the canonical path the workspace policy resolved at
+     * session creation. Callers that hand over a raw path would make publish
+     * compare a non-canonical root against realpath'd targets.
+     */
     constructor(
         readonly agentId: string,
         readonly protocol: AgentdProtocol,

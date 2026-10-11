@@ -6,7 +6,7 @@ import test from 'node:test'
 import { ManagedSession, SessionRequestError } from '../src/session.js'
 
 test('publishes regular workspace files without exposing the absolute path', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-publish-'))
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-publish-'))
     const workspace = path.join(directory, 'workspace')
     const outside = path.join(directory, 'outside.txt')
     await mkdir(path.join(workspace, 'dist'), { recursive: true })
@@ -78,7 +78,7 @@ test('publish fails closed when the workspace is swapped for a junction after th
 })
 
 test('rejects workspace symlink escapes', { skip: process.platform === 'win32' }, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-publish-link-'))
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-publish-link-'))
     const workspace = path.join(directory, 'workspace')
     const outside = path.join(directory, 'outside.txt')
     await mkdir(workspace, { recursive: true })
