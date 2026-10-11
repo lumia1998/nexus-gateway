@@ -1,5 +1,6 @@
-import { readdirSync } from 'node:fs'
+import { realpathSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import os from 'node:os'
 import path from 'node:path'
 
 // `npm test` used to hand `test/*.test.ts` straight to the test runner. On Linux
@@ -19,6 +20,12 @@ if (files.length === 0) {
 }
 
 const tsx = path.resolve(workspace, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+// The Windows CI runner hands the suite a non-canonical temp directory
+// (`C:\Users\RUNNER~1\...`), while the gateway canonicalises every workspace
+// path through realpath. Tests comparing the two then failed on the 8.3 short
+// form. Passing a canonical temp directory keeps the suite observing one
+// consistent path on every platform.
+const canonicalTemp = realpathSync(os.tmpdir())
 const result = spawnSync(
     process.execPath,
     [
@@ -29,7 +36,15 @@ const result = spawnSync(
         ...files,
         ...process.argv.slice(2)
     ],
-    { stdio: 'inherit' }
+    {
+        stdio: 'inherit',
+        env: {
+            ...process.env,
+            TEMP: canonicalTemp,
+            TMP: canonicalTemp,
+            TMPDIR: canonicalTemp
+        }
+    }
 )
 if (result.error) throw result.error
 process.exit(result.status ?? 1)
