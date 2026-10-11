@@ -36,7 +36,7 @@
   "scripts": {
     "build": "node scripts/generate-webui-sources.mjs && node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "typecheck": "node scripts/generate-webui-sources.mjs && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webui.json",
-    "test": "tsx --test --test-force-exit --test-concurrency=1 test/*.test.ts",
+    "test": "node scripts/run-tests.mjs",
     "test:webui": "node scripts/generate-webui-sources.mjs && playwright test",
     "prepack": "npm run build"
   },
