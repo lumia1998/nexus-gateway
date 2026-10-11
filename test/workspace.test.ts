@@ -111,6 +111,40 @@ test('isPathInside keeps containment case-sensitive and separator-aware', () => 
     assert.equal(isWithin, isPathInside)
 })
 
+test('isPathInside folds hand-written Windows spellings without lower-casing', {
+    skip: process.platform !== 'win32'
+}, () => {
+    assert.equal(isPathInside('C:\\a', 'C:\\a\\..\\b'), false)
+    assert.equal(isPathInside('C:\\a', 'C:\\a\\b'), true)
+    assert.equal(isPathInside('C:\\a', 'C:\\a\\\\b'), true)
+    assert.equal(isPathInside('C:\\a', 'C:\\a\\'), true)
+    // path.resolve folds lexical noise but keeps the spelling, so the A1 fix
+    // still holds for the previously published name.
+    assert.equal(isPathInside('C:\\Repo', 'C:\\repo\\secret'), false)
+})
+
+test('isWithin keeps the published behaviour of isPathInside for the same inputs', () => {
+    const root = `root${path.sep}repo`
+    const targets = [
+        root,
+        `${root}${path.sep}`,
+        `${root}${path.sep}child`,
+        `${root}${path.sep}${path.sep}child`,
+        `${root}${path.sep}.${path.sep}child`,
+        `${root}${path.sep}child${path.sep}..`,
+        `${root}${path.sep}..${path.sep}sibling`,
+        `root${path.sep}Repo${path.sep}secret`,
+        `root${path.sep}repo2`
+    ]
+    for (const target of targets) {
+        assert.equal(
+            isWithin(root, target),
+            isPathInside(root, target),
+            `isWithin and isPathInside disagreed for ${target}`
+        )
+    }
+})
+
 test('workspace policy admits a root spelled with different case on a case-insensitive volume', {
     skip: process.platform !== 'win32'
 }, async () => {
