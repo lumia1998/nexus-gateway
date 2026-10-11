@@ -2,6 +2,44 @@
 
 本项目遵循语义化版本，记录 Nexus Gateway 面向使用者的重要变化。
 
+## [0.5.0] - 2026-10-12
+
+### ACP 驱动
+- 新增 `dsh` 驱动：调用 DeepSeek Harness 自带的 ACP 入口 `dsh --profile acp`，可用性探测用
+  `dsh --version`。
+- 新增 `grok` 驱动：调用 Grok Build 自带的 ACP 入口 `grok --no-auto-update agent stdio`；
+  `--no-auto-update` 跳过自动化环境中的后台更新检查，需要时可用本机配置的 `args` 覆盖。
+- 两个驱动都使用各自 CLI 自带的入口，不需要 Adapter。README 补充了前置条件：`dsh` 必须在 PATH 上
+  （或在配置里用 `command` 指定绝对路径）；`grok` 需要先 `grok login` 缓存凭据，或通过 `inheritEnv` /
+  `env` 提供 `XAI_API_KEY` —— Gateway 的 ACP 客户端不发送 `authenticate` 请求，未认证时 grok 会在
+  握手后失败。
+
+### 安全
+- 修复发布接口的信任根漂移：`publishSingleFile` 每次调用都会重新 `realpath` 会话工作区，并用结果作为
+  包含性判定的根。工作区路径在会话创建时已经解析过，再解析一次等于把信任决定交回文件系统：创建后把
+  工作区换成指向别处的联接，被指向的目录就会成为新的根，相对路径的发布请求因此可以读到 allowlist 之外
+  的任意文件。现在直接使用会话创建时的规范路径，工作区被替换后发布按失败关闭处理。
+- 修复 allowlist 在大小写敏感目录上的越权放行：包含性判定基于 `path.relative`，其 win32 实现会把两侧转
+  成小写，因此在启用按目录大小写敏感（`fsutil file setCaseSensitiveInfo`）后，`repo` 与 `Repo` 这两个
+  不同目录会被判成同一个，根外路径被放行。判定改为对规范路径做带尾分隔符的前缀比较，并合并了原先重复的
+  两份实现（`isWithin` / `isContained`）；`isWithin` 作为已发布的导出保留为弃用别名。
+
+### 产物存储
+- 修复短路径或软链接父目录下产物写入整体失败（报 `Invalid artifact payload path`）：运行目录经
+  `realDirectory()` 规范化后，却与由配置的产物根直接拼出的 `path.dirname(payloadPath())` 比较，同一个
+  目录两侧字符串不同即被判为越界。现在比较的两侧都走规范化。
+- 产物读写路径的包含性判定同样改用上述共享的大小写敏感比较。
+
+### 测试与工程
+- 修复 Windows CI 测试任务失败：`npm test` 把 `test/*.test.ts` 直接交给测试运行器，Linux 上由 shell
+  展开，Windows 上 cmd.exe 不展开、Node 20 的 `--test` 也不做 glob 展开。现在由
+  `scripts/run-tests.mjs` 自行展开文件列表，不再依赖 shell。
+- 测试夹具统一从 `realpath(os.tmpdir())` 创建临时目录，避免 CI runner 的 8.3 短路径与 realpath 结果
+  不一致造成的假失败。
+- 新增大小写敏感目录的集成用例（真实启用 `fsutil` 属性，宿主不支持时明确跳过）与 UNC 共享分隔符用例。
+- 修复「产物不得泄漏绝对路径」的断言：`JSON.stringify` 会把 `\` 转义成 `\\`，原断言在 Windows 上永远
+  为真；现在比较转义后的形式。
+
 ## [0.4.1] - 2026-09-11
 
 ### 进程与资源回收
