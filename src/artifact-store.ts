@@ -723,7 +723,11 @@ export class ArtifactStore {
             throw new Error('Artifact run directory escaped the artifact root')
         }
         const filePath = this.payloadPath(item.runId, item.id)
-        const fileRealParent = path.dirname(filePath)
+        // payloadPath() derives from the configured artifact root, which is not
+        // necessarily canonical (a Windows 8.3 short path or a symlinked parent),
+        // while runReal was resolved through realDirectory(). Compare the payload
+        // with the same canonical directory instead of the raw string.
+        const fileRealParent = await this.realDirectory(path.dirname(filePath))
         if (!isContained(runReal, fileRealParent)) throw new Error('Invalid artifact payload path')
         const delta = item.bytes.length - (entry.bytes || 0)
         const previousView = entry.durableView

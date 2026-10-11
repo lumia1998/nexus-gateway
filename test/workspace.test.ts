@@ -10,7 +10,7 @@ import {
 } from '../src/workspace.js'
 
 test('workspace policy accepts descendants and rejects traversal/outside paths', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-agentd-workspace-'))
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-agentd-workspace-'))
     const root = path.join(directory, 'allowed')
     const project = path.join(root, 'project')
     const outside = path.join(directory, 'outside')
