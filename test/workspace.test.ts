@@ -143,6 +143,16 @@ test('isWithin keeps the published behaviour of isPathInside for the same inputs
     }
 })
 
+test('isPathInside keeps UNC shares distinct', { skip: process.platform !== 'win32' }, () => {
+    const share = '\\\\server\\share'
+    assert.equal(isPathInside(share, share), true)
+    assert.equal(isPathInside(share, share + '\\child'), true)
+    // The trailing separator is what keeps a differently-named share out: without
+    // it, `\\server\share2\child` would read as living inside `\\server\share`.
+    assert.equal(isPathInside(share, '\\\\server\\share2\\child'), false)
+    assert.equal(isPathInside(share, '\\\\server\\share-other'), false)
+})
+
 test('workspace policy admits a root spelled with different case on a case-insensitive volume', {
     skip: process.platform !== 'win32'
 }, async () => {
