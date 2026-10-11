@@ -26,6 +26,7 @@ const tsx = path.resolve(workspace, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 // form. Passing a canonical temp directory keeps the suite observing one
 // consistent path on every platform.
 const canonicalTemp = realpathSync(os.tmpdir())
+console.log(`run-tests: os.tmpdir()=${os.tmpdir()} canonical=${canonicalTemp}`)
 const result = spawnSync(
     process.execPath,
     [
