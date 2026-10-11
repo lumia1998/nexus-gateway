@@ -19,17 +19,24 @@ test('registers every supported ACP driver with stable defaults', () => {
             pi: { driver: 'pi' },
             openclaw: { driver: 'openclaw' },
             hermes: { driver: 'hermes' },
+            dsh: { driver: 'dsh' },
+            grok: { driver: 'grok' },
             disabled: { driver: 'codex', enabled: false }
         })
     )
 
-    assert.equal(drivers.size, 6)
+    assert.equal(drivers.size, 8)
     assert.deepEqual(driverCommand(drivers, 'opencode'), ['opencode', ['acp']])
     assert.deepEqual(driverCommand(drivers, 'claude'), ['claude-agent-acp', []])
     assert.deepEqual(driverCommand(drivers, 'codex'), ['codex-acp', []])
     assert.deepEqual(driverCommand(drivers, 'pi'), ['pi-acp', []])
     assert.deepEqual(driverCommand(drivers, 'openclaw'), ['openclaw', ['acp']])
     assert.deepEqual(driverCommand(drivers, 'hermes'), ['hermes', ['acp']])
+    assert.deepEqual(driverCommand(drivers, 'dsh'), ['dsh', ['--profile', 'acp']])
+    assert.deepEqual(
+        driverCommand(drivers, 'grok'),
+        ['grok', ['--no-auto-update', 'agent', 'stdio']]
+    )
     assert.equal(drivers.get('openclaw')?.env.OPENCLAW_HIDE_BANNER, '1')
     assert.equal(drivers.has('disabled'), false)
 })
@@ -40,6 +47,8 @@ test('probes configured ACP commands without depending on installed agents', asy
         driver,
         command: node,
         args: [],
+        // Grok Build answers `grok version`; the node stand-in answers `--version`.
+        probeArgs: driver === 'grok' ? ['--version'] : undefined,
         env: driver === 'pi' ? { PI_ACP_PI_COMMAND: node } : undefined
     })
     const drivers = createDriverRegistry(
@@ -48,7 +57,9 @@ test('probes configured ACP commands without depending on installed agents', asy
             claude: probeConfig('claude'),
             codex: probeConfig('codex'),
             pi: probeConfig('pi'),
-            openclaw: probeConfig('openclaw')
+            openclaw: probeConfig('openclaw'),
+            dsh: probeConfig('dsh'),
+            grok: probeConfig('grok')
         })
     )
 
@@ -103,14 +114,16 @@ test('loads every supported ACP driver kind and rejects unknown drivers', async 
                     codex: {},
                     pi: {},
                     openclaw: {},
-                    hermes: {}
+                    hermes: {},
+                    dsh: {},
+                    grok: {}
                 }
             })
         )
         const loaded = await loadAgentdConfig(file)
         assert.deepEqual(
             Object.values(loaded.agents).map((agent) => agent.driver),
-            ['opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes']
+            ['opencode', 'claude', 'codex', 'pi', 'openclaw', 'hermes', 'dsh', 'grok']
         )
 
         await writeFile(
