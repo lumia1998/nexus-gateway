@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -22,12 +22,56 @@ test('publishes regular workspace files without exposing the absolute path', asy
             path: 'dist/report.md',
             size: 8
         })
-        assert.equal(JSON.stringify(artifact).includes(directory), false)
+        // JSON escaping doubles every backslash, so compare against the escaped
+        // form; the raw path can never appear in the serialized artifact.
+        const escapedDirectory = JSON.stringify(directory).slice(1, -1)
+        assert.equal(JSON.stringify(artifact).includes(escapedDirectory), false)
         await assert.rejects(
             () => session.publishFile('../outside.txt'),
             (error: unknown) =>
                 error instanceof SessionRequestError && error.status === 403
         )
+    } finally {
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('publish fails closed when the workspace is swapped for a junction after the session was created', async () => {
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-publish-swap-'))
+    const workspace = path.join(directory, 'workspace')
+    const elsewhere = path.join(directory, 'elsewhere')
+    await mkdir(workspace, { recursive: true })
+    await mkdir(elsewhere, { recursive: true })
+    await writeFile(path.join(workspace, 'inside.txt'), 'inside')
+    await writeFile(path.join(elsewhere, 'credentials.txt'), 'host-credential')
+    const session = managedSession(workspace)
+    try {
+        // Baseline: publishing works while the workspace is still a real directory.
+        assert.equal((await session.publishFile('inside.txt')).filename, 'inside.txt')
+
+        // Replace the workspace with a link to another directory. 'junction'
+        // needs no elevation on Windows, unlike symlink(..., 'dir'), so this
+        // case runs on every platform instead of being skipped.
+        await rm(workspace, { recursive: true, force: true })
+        await symlink(elsewhere, workspace, process.platform === 'win32' ? 'junction' : 'dir')
+        assert.equal(
+            (await lstat(workspace)).isSymbolicLink(),
+            true,
+            'the workspace swap must take effect'
+        )
+
+        // The trust root is the canonical workspace captured when the session
+        // was created, so the swapped directory is outside it: publishing must
+        // fail closed with 403 instead of reading the file it now points at.
+        const leaked = await session.publishFile('credentials.txt').then(
+            (artifact) => artifact,
+            (error: unknown) => error
+        )
+        assert.ok(
+            leaked instanceof SessionRequestError,
+            `expected a 403 rejection, got artifact ${JSON.stringify(leaked)}`
+        )
+        assert.equal(leaked.status, 403)
     } finally {
         await rm(directory, { recursive: true, force: true })
     }
