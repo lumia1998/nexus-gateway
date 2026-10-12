@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path'
 import { networkInterfaces } from 'node:os'
+import { BlockList, isIP } from 'node:net'
 import { ensureAgentdConfig } from './config.js'
 import { startAgentd } from './index.js'
 
@@ -20,6 +21,9 @@ const label =
 console.log(`nexus-agentd listening on ${label}`)
 for (const url of displayUrls(address)) console.log(`WebUI: ${url}`)
 if (bootstrap.created) console.log(`Created config: ${configPath}`)
+if (!runtime.config.secureAdminCookies && !isLoopbackHost(runtime.config.listen.host)) {
+    console.warn('Security: Console Password and admin cookies sent over HTTP can be intercepted. This listener is suitable only for a trusted LAN. For untrusted networks, use an HTTPS reverse proxy, configure publicOrigins and set secureAdminCookies=true; restrict direct HTTP access with a firewall.')
+}
 if (runtime.controlPlane.setupToken) {
     console.log('Setup required: enter the following one-time setup token in the WebUI, then create the Console Password.')
     console.log(`Setup token: ${runtime.controlPlane.setupToken}`)
@@ -34,6 +38,16 @@ const shutdown = () => void close().then(() => process.exit(0), (error) => {
 })
 process.once('SIGINT', shutdown)
 process.once('SIGTERM', shutdown)
+
+function isLoopbackHost(host: string) {
+    const address = host.replace(/^\[|\]$/g, '')
+    const family = isIP(address)
+    if (!family) return host.toLowerCase() === 'localhost'
+    const loopback = new BlockList()
+    loopback.addSubnet('127.0.0.0', 8)
+    loopback.addAddress('::1', 'ipv6')
+    return loopback.check(address, family === 6 ? 'ipv6' : 'ipv4')
+}
 
 function resolveConfigPath(args: string[]) {
     const index = args.indexOf('--config')

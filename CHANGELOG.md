@@ -2,6 +2,11 @@
 
 本项目遵循语义化版本，记录 Nexus Gateway 面向使用者的重要变化。
 
+## [0.5.1] - 2026-10-12
+
+- 非回环监听且管理 Cookie 未启用 `Secure` 时，CLI 在每次启动提示纯 HTTP 传输风险，以及 HTTPS 反代、
+  `publicOrigins`、`secureAdminCookies` 和防火墙的配置要求。保留文档约定的可信 LAN HTTP 登录行为。
+
 ## [0.5.0] - 2026-10-12
 
 ### ACP 驱动

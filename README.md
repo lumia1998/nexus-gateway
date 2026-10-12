@@ -389,6 +389,8 @@ for await (const event of client.events(session.id)) {
 - 默认监听 `0.0.0.0`；已有配置的监听值不会被覆盖。用主机防火墙限制来源。
 - LAN 上的纯 HTTP 为兼容 Cookie 默认不设置 `Secure`；跨不可信网络应放在 HTTPS/mTLS 反向代理或可信
   隧道后，并将 `secureAdminCookies` 设为 `true`。
+- 非回环监听且 `secureAdminCookies` 未启用时，CLI 会在每次启动提示 HTTP 密码与管理 Cookie 可被截获；
+  使用 HTTPS 反代时配置准确的 `publicOrigins`，并用防火墙限制对后端 HTTP 端口的直接访问。
 - 不直接暴露公网，使用专用低权限系统账号运行 Gateway。
 
 ### Host 与 Origin
