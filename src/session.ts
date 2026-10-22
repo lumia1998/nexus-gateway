@@ -276,6 +276,30 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
         return (await this.publishFiles([filePath]))[0]
     }
 
+    /**
+     * Artifacts are persisted against a run. A client may publish before it ever
+     * sends a prompt, so open a completed placeholder run for that case instead
+     * of accepting an artifact that would never become downloadable.
+     */
+    private ensureArtifactRun() {
+        if (!this.runStore) return undefined
+        if (this.currentRunId) return this.currentRunId
+        const run = this.runStore.create({
+            sessionId: this.id,
+            agentId: this.agentId,
+            agentName: this.agentName,
+            protocol: this.protocol,
+            workspace: this.workspace,
+            protocolSessionId: this.protocolSessionId,
+            ownerKeyId: this.ownerKeyId,
+            task: 'publish artifacts'
+        })
+        const endedAt = Date.now()
+        this.runStore.update(run.id, { state: 'completed', endedAt, updatedAt: endedAt })
+        this.currentRunId = run.id
+        return run.id
+    }
+
     async publishFiles(filePaths: string[]) {
         const requested = filePaths
             .map((value) => String(value || '').trim())
@@ -292,6 +316,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
                 'This session does not have a local workspace'
             )
         }
+        this.ensureArtifactRun()
         const seen = new Set<string>()
         const artifacts: AgentdArtifact[] = []
         for (const requestedPath of requested) {

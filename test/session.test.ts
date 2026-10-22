@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ManagedSession, SessionRequestError } from '../src/session.js'
+import { RunStore } from '../src/run-store.js'
 
 test('publishes regular workspace files without exposing the absolute path', async () => {
     const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-publish-'))
@@ -165,3 +166,41 @@ function managedSession(workspace: string) {
         'OpenCode'
     )
 }
+
+test('publish before any prompt persists a downloadable artifact on a placeholder run', async () => {
+    const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), 'nexus-publish-norun-'))
+    const workspace = path.join(directory, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    await writeFile(path.join(workspace, 'deliverable.bin'), Buffer.alloc(4096, 0x41))
+    const store = new RunStore(path.join(directory, 'runs.json'), {
+        rootDir: path.join(directory, 'artifacts')
+    })
+    try {
+        await store.init()
+        const session = new ManagedSession(
+            'opencode',
+            'acp',
+            workspace,
+            'test-key',
+            100,
+            32 * 1024,
+            'OpenCode',
+            store
+        )
+        // No prompt has been sent, so the session has no current run yet.
+        const artifact = await session.publishFile('deliverable.bin')
+        assert.equal(artifact.filename, 'deliverable.bin')
+        await store.flush()
+        const runs = store.list({}).runs
+        assert.equal(runs.length, 1)
+        const run = runs[0]
+        assert.equal(run.state, 'completed')
+        const view = store.artifactViews(run.id)!.find((item) => item.id === artifact.id)
+        assert.equal(view?.storageStatus, 'available')
+        assert.equal(view?.size, 4096)
+        assert.ok(await store.readArtifact(run.id, String(artifact.id)))
+    } finally {
+        await store.flush().catch(() => undefined)
+        await rm(directory, { recursive: true, force: true })
+    }
+})
