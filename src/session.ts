@@ -401,7 +401,10 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 
     emit(type: AgentdEventType, data?: unknown) {
         this.updatedAt = Date.now()
-        this.events.append(type, data)
+        this.events.append(
+            type,
+            type === 'artifact' && data ? runArtifact(data as AgentdArtifact) : data
+        )
         const progress = progressForEvent(type, data)
         if (progress) this.syncRun({ progress })
     }
@@ -532,7 +535,9 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             state: this.state,
             output: this.output || undefined,
             error: this.error,
-            artifacts: structuredClone(this.artifacts),
+            // Public view only: `sourcePath` is a host path and must never be
+            // serialized into a session, run, or event payload.
+            artifacts: this.artifacts.map(runArtifact),
             inputAttachments: Array.from(this.inputAttachments.values()).map(attachmentView),
             pendingRequest: this.pendingRequest
                 ? structuredClone(this.pendingRequest)

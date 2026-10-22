@@ -190,6 +190,9 @@ test('publish before any prompt persists a downloadable artifact on a placeholde
         // No prompt has been sent, so the session has no current run yet.
         const artifact = await session.publishFile('deliverable.bin')
         assert.equal(artifact.filename, 'deliverable.bin')
+        // The public artifact contract must not leak the host path used to
+        // copy the payload.
+        assert.equal(JSON.stringify(session.snapshot().artifacts).includes(workspace), false)
         await store.flush()
         const runs = store.list({}).runs
         assert.equal(runs.length, 1)
