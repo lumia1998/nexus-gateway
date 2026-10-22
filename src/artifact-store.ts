@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import type { Readable } from 'node:stream'
 import {
     chmod as fsChmod,
+    copyFile as fsCopyFile,
     lstat as fsLstat,
     mkdir as fsMkdir,
     open as fsOpen,
@@ -47,6 +50,17 @@ export interface ArtifactReadResult {
     mediaType?: string
 }
 
+/**
+ * Streaming read used for downloads. Artifacts can be gigabytes, so callers
+ * must not materialise them in memory just to hand them to a socket.
+ */
+export interface ArtifactStreamResult {
+    stream: Readable
+    size: number
+    filename: string
+    mediaType?: string
+}
+
 export interface ArtifactStoreMetrics {
     totalPayloadBytes: number
     /** Short alias useful to metrics consumers. */
@@ -77,6 +91,7 @@ export interface ArtifactStoreIo {
     unlink?: (...args: any[]) => Promise<any>
     rm?: (...args: any[]) => Promise<any>
     open?: (...args: any[]) => Promise<any>
+    copyFile?: (...args: any[]) => Promise<any>
 }
 
 export interface ArtifactStoreOptions {
@@ -84,7 +99,7 @@ export interface ArtifactStoreOptions {
     rootDir?: string
     /** Alias accepted for configuration adapters. */
     artifactRootDir?: string
-    /** Maximum payload size for one artifact. Defaults to 12 MiB. */
+    /** Maximum payload size for one artifact. Defaults to 2 GiB. */
     maxArtifactBytes?: number
     /** Maximum number of artifact metadata entries retained per run. */
     maxArtifactsPerRun?: number
@@ -132,15 +147,29 @@ interface PendingArtifact {
     runId: string
     id: string
     view: StoredArtifactView
-    bytes: Buffer
+    /** In-memory payload. Absent when the payload is a file copied at flush. */
+    bytes?: Buffer
+    /** Host path copied into the store on flush. Never exposed through the API. */
+    sourcePath?: string
+    /** Declared payload size, in bytes. */
+    size: number
+    /** Source identity used to skip re-copying an unchanged file. */
+    signature?: string
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
-const DEFAULT_MAX_ARTIFACT_BYTES = 12 * 1024 * 1024
+/** One artifact may be 2 GiB; file-backed payloads are copied, not buffered. */
+const DEFAULT_MAX_ARTIFACT_BYTES = 2 * 1024 ** 3
 const DEFAULT_MAX_ARTIFACTS_PER_RUN = 32
-const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024
-const DEFAULT_MAX_QUEUED_BYTES = 64 * 1024 * 1024
-const DEFAULT_RETENTION_DAYS = 30
+const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 ** 3
+const DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 ** 3
+const DEFAULT_RETENTION_DAYS = 7
+/**
+ * Protocol payloads arrive base64-inlined inside a JSON-RPC frame, so they stay
+ * bounded far below the artifact ceiling: a 2 GiB base64 string would not fit
+ * in a V8 string at all. Large deliverables must use `sourcePath`.
+ */
+const MAX_INLINE_ARTIFACT_BYTES = 64 * 1024 * 1024
 const MAX_FILENAME_CHARS = 180
 const MAX_METADATA_CHARS = 16 * 1024
 const MAX_DESCRIPTION_CHARS = 8 * 1024
@@ -170,6 +199,12 @@ export class ArtifactStore {
     private readonly pending = new Map<string, Map<string, PendingArtifact>>()
     private readonly inFlight = new Map<string, PendingArtifact>()
     private readonly pendingDeletes = new Set<string>()
+    /**
+     * Identity of the file a run artifact was last copied from. Session snapshots
+     * re-report every artifact on each run update, so without this a 2 GiB
+     * deliverable would be re-copied on every event.
+     */
+    private readonly fileSignatures = new Map<string, string>()
     private readonly pendingManifests = new Set<string>()
     private queuedBytes = 0
     private totalBytes = 0
@@ -181,9 +216,9 @@ export class ArtifactStore {
 
     constructor(rootDir: string, options: ArtifactStoreOptions = {}) {
         this.rootDir = path.resolve(options.rootDir || options.artifactRootDir || rootDir)
-        this.maxArtifactBytes = Math.min(
-            DEFAULT_MAX_ARTIFACT_BYTES,
-            positiveInteger(options.maxArtifactBytes, DEFAULT_MAX_ARTIFACT_BYTES)
+        this.maxArtifactBytes = positiveInteger(
+            options.maxArtifactBytes,
+            DEFAULT_MAX_ARTIFACT_BYTES
         )
         this.maxArtifactsPerRun = positiveInteger(
             options.maxArtifactsPerRun,
@@ -193,9 +228,12 @@ export class ArtifactStore {
             options.maxTotalBytes ?? options.maxDiskBytes,
             DEFAULT_MAX_TOTAL_BYTES
         )
+        // The queue budget must be able to hold at least one artifact at the
+        // configured ceiling, otherwise a full-size deliverable is rejected by
+        // the queue before it can be copied.
         this.maxQueuedBytes = nonNegativeInteger(
             options.maxQueuedBytes,
-            Math.min(DEFAULT_MAX_QUEUED_BYTES, Math.max(this.maxArtifactBytes, 4 * 1024 * 1024))
+            Math.max(this.maxArtifactBytes, DEFAULT_MAX_QUEUED_BYTES)
         )
         this.retentionDays = nonNegativeNumber(options.retentionDays, DEFAULT_RETENTION_DAYS)
         this.now = options.now || Date.now
@@ -211,7 +249,8 @@ export class ArtifactStore {
             lstat: options.io?.lstat || fsLstat,
             unlink: options.io?.unlink || fsUnlink,
             rm: options.io?.rm || fsRm,
-            open: options.io?.open || fsOpen
+            open: options.io?.open || fsOpen,
+            copyFile: options.io?.copyFile || fsCopyFile
         }
     }
 
@@ -307,6 +346,14 @@ export class ArtifactStore {
             const old = byId.get(normalized.id)
             const oldEntry = this.entries.get(entryKey(runId, normalized.id))
             const payload = payloadForArtifact(artifact, this.maxArtifactBytes)
+            const payloadSize = payload.bytes
+                ? payload.bytes.length
+                : payload.sourcePath
+                  ? payload.size
+                  : 0
+            const signature = payload.sourcePath
+                ? fileSignature(artifact, payload.size)
+                : undefined
             const baseView: StoredArtifactView = {
                 ...normalized.view,
                 ...(old ? { createdAt: old.createdAt, expiresAt: old.expiresAt } : {}),
@@ -316,58 +363,69 @@ export class ArtifactStore {
                 storageError: payload.error
             }
             let next = baseView
+            const key = entryKey(runId, normalized.id)
             const oldPending = this.pending.get(runId)?.get(normalized.id)
-            const oldInFlight = this.inFlight.get(entryKey(runId, normalized.id))
-            if (
-                payload.bytes &&
-                oldEntry?.view.storageStatus === 'available' &&
-                oldEntry.view.sha256 === sha256(payload.bytes)
-            ) {
+            const oldInFlight = this.inFlight.get(key)
+            const reusable = oldEntry?.view.storageStatus === 'available'
+            // An unchanged payload is never copied twice: compare bytes when the
+            // protocol inlined them, otherwise compare the source signature.
+            const duplicateOnDisk =
+                Boolean(reusable) &&
+                (payload.bytes
+                    ? oldEntry!.view.sha256 === sha256(payload.bytes)
+                    : Boolean(signature) && this.fileSignatures.get(key) === signature)
+            const duplicateQueued = payload.bytes
+                ? Boolean(oldPending?.bytes?.equals(payload.bytes))
+                : Boolean(signature) && oldPending?.signature === signature
+            const duplicateInFlight = payload.bytes
+                ? Boolean(oldInFlight?.bytes?.equals(payload.bytes))
+                : Boolean(signature) && oldInFlight?.signature === signature
+            if (duplicateOnDisk) {
                 next = {
-                    ...oldEntry.view,
+                    ...oldEntry!.view,
                     ...baseView,
                     storageStatus: 'available',
                     downloadable: true,
-                    size: oldEntry.bytes,
-                    sha256: oldEntry.view.sha256,
-                    storedAt: oldEntry.view.storedAt,
+                    size: oldEntry!.bytes,
+                    sha256: oldEntry!.view.sha256,
+                    storedAt: oldEntry!.view.storedAt,
                     storageError: undefined
                 }
-            } else if (payload.bytes && oldPending?.bytes.equals(payload.bytes)) {
+            } else if (duplicateQueued && oldPending) {
                 next = {
                     ...oldPending.view,
                     ...baseView,
                     storageStatus: 'pending',
                     downloadable: false,
                     storageError: undefined,
-                    size: payload.bytes.length
+                    size: payloadSize
                 }
                 oldPending.view = next
-            } else if (payload.bytes && oldInFlight?.bytes.equals(payload.bytes)) {
+            } else if (duplicateInFlight && oldInFlight) {
                 next = {
                     ...oldInFlight.view,
                     ...baseView,
                     storageStatus: 'pending',
                     downloadable: false,
                     storageError: undefined,
-                    size: payload.bytes.length,
-                    sha256: sha256(payload.bytes)
+                    size: payloadSize,
+                    sha256: payload.bytes ? sha256(payload.bytes) : oldInFlight.view.sha256
                 }
                 oldInFlight.view = next
-            } else if (payload.bytes) {
+            } else if (payload.bytes || payload.sourcePath) {
                 // A repeated protocol id replaces a pending snapshot but keeps
                 // the previous metadata until the replacement commits.
                 this.removePending(runId, normalized.id)
-                if (this.queuedBytes + payload.bytes.length > this.maxQueuedBytes) {
-                    next = oldEntry?.view.storageStatus === 'available'
+                if (this.queuedBytes + payloadSize > this.maxQueuedBytes) {
+                    next = reusable
                         ? {
-                            ...oldEntry.view,
+                            ...oldEntry!.view,
                             ...baseView,
                             storageStatus: 'available',
                             downloadable: true,
-                            size: oldEntry.bytes,
-                            sha256: oldEntry.view.sha256,
-                            storedAt: oldEntry.view.storedAt,
+                            size: oldEntry!.bytes,
+                            sha256: oldEntry!.view.sha256,
+                            storedAt: oldEntry!.view.storedAt,
                             storageError: 'Artifact persistence queue budget exceeded'
                         }
                         : {
@@ -382,29 +440,31 @@ export class ArtifactStore {
                         storageStatus: 'pending',
                         downloadable: false,
                         storageError: undefined,
-                        size: payload.bytes.length,
-                        sha256: sha256(payload.bytes)
+                        size: payloadSize,
+                        sha256: payload.bytes ? sha256(payload.bytes) : undefined
                     }
                     const pending: PendingArtifact = {
                         runId,
                         id: normalized.id,
                         view: next,
-                        bytes: payload.bytes
+                        bytes: payload.bytes,
+                        sourcePath: payload.sourcePath,
+                        size: payloadSize,
+                        signature
                     }
                     this.addPending(pending)
                 }
-            }
-            else if (oldEntry?.view.storageStatus === 'available') {
+            } else if (reusable) {
                 // Metadata updates from a protocol stream can omit bytes after
                 // the first snapshot. Keep the durable payload downloadable.
                 next = {
-                    ...oldEntry.view,
+                    ...oldEntry!.view,
                     ...baseView,
                     storageStatus: 'available',
                     downloadable: true,
-                    size: oldEntry.bytes,
-                    sha256: oldEntry.view.sha256,
-                    storedAt: oldEntry.view.storedAt,
+                    size: oldEntry!.bytes,
+                    sha256: oldEntry!.view.sha256,
+                    storedAt: oldEntry!.view.storedAt,
                     storageError: payload.error
                 }
             }
@@ -453,6 +513,7 @@ export class ArtifactStore {
 
     private dropEntry(entry: ArtifactEntry) {
         this.entries.delete(entryKey(entry.runId, entry.id))
+        this.fileSignatures.delete(entryKey(entry.runId, entry.id))
         this.removePending(entry.runId, entry.id)
         this.totalBytes -= entry.bytes || 0
         if (entry.filePath) {
@@ -532,6 +593,39 @@ export class ArtifactStore {
         }
     }
 
+    /**
+     * Streams one artifact payload. Containment is re-verified exactly like
+     * `readArtifact`, but the bytes never enter memory: a download can be
+     * multiple gigabytes.
+     */
+    async openArtifact(
+        runId: string,
+        artifactId: string
+    ): Promise<ArtifactStreamResult | undefined> {
+        this.assertInitialized()
+        const entry = this.entries.get(entryKey(runId, artifactId))
+        if (!entry || entry.view.storageStatus !== 'available' || !entry.filePath) return undefined
+        const filePath = entry.filePath
+        try {
+            const runReal = await this.realDirectory(this.runDirectory(runId))
+            const fileReal = await this.realPath(filePath)
+            if (!isPathInside(runReal, fileReal)) return undefined
+            const stat = await this.io.lstat(filePath)
+            if (!stat.isFile() || stat.isSymbolicLink()) return undefined
+            const size = Number(stat.size)
+            if (!Number.isFinite(size) || size > this.maxArtifactBytes) return undefined
+            return {
+                stream: createReadStream(filePath),
+                size,
+                filename: entry.view.filename || entry.view.name || `artifact-${artifactId}`,
+                mediaType: entry.view.mediaType
+            }
+        } catch (error) {
+            if (isMissing(error)) return undefined
+            throw error
+        }
+    }
+
     /** Queue removal of one run's own directory. Active runs are protected. */
     removeRun(runId: string) {
         this.assertInitialized()
@@ -542,11 +636,12 @@ export class ArtifactStore {
                 const entry = this.entries.get(key)
                 this.totalBytes -= entry?.bytes || 0
                 this.entries.delete(key)
+                this.fileSignatures.delete(key)
             }
         }
         const pending = this.pending.get(runId)
         if (pending) {
-            for (const item of pending.values()) this.queuedBytes -= item.bytes.length
+            for (const item of pending.values()) this.queuedBytes -= item.size
             this.pending.delete(runId)
         }
         this.pendingManifests.delete(runId)
@@ -568,7 +663,7 @@ export class ArtifactStore {
         const batch = this.pending.get(runId)
         const queued = batch?.get(artifactId)
         if (queued) {
-            this.queuedBytes -= queued.bytes.length
+            this.queuedBytes -= queued.size
             batch!.delete(artifactId)
             if (!batch!.size) this.pending.delete(runId)
         }
@@ -577,6 +672,7 @@ export class ArtifactStore {
             this.totalBytes -= entry.bytes || 0
         }
         this.entries.delete(key)
+        this.fileSignatures.delete(key)
         await this.writeManifest(runId)
         this.emit(runId, this.viewsForRun(runId))
         return true
@@ -713,7 +809,7 @@ export class ArtifactStore {
             // The entry was dropped after this batch left `pending`, so
             // removeRun and dropEntry could no longer see it there. Releasing
             // the budget here is the only remaining place that can.
-            this.queuedBytes -= item.bytes.length
+            this.queuedBytes -= item.size
             return
         }
         const runDir = this.runDirectory(item.runId)
@@ -730,15 +826,40 @@ export class ArtifactStore {
         // with the same canonical directory instead of the raw string.
         const fileRealParent = await this.realDirectory(path.dirname(filePath))
         if (!isPathInside(runReal, fileRealParent)) throw new Error('Invalid artifact payload path')
-        const delta = item.bytes.length - (entry.bytes || 0)
         const previousView = entry.durableView
         const previousPath = entry.filePath
         const previousBytes = entry.bytes
         const temp = `${filePath}.${process.pid}.${randomUUID()}.tmp`
         try {
-            await this.ensureBudget(item.runId, delta, entry)
-            await this.io.writeFile(temp, item.bytes, { flag: 'wx', mode: 0o600 })
-            await this.io.chmod(temp, 0o600).catch(() => undefined)
+            // Resolve the real payload size before reserving budget: a workspace
+            // file may have grown since its artifact metadata was recorded.
+            let payloadSize = item.size
+            if (item.sourcePath) {
+                const source = await this.io.lstat(item.sourcePath)
+                if (!source.isFile() || source.isSymbolicLink()) {
+                    throw new ArtifactPayloadError('Artifact source is not a regular file')
+                }
+                payloadSize = Number(source.size)
+                if (!Number.isFinite(payloadSize) || payloadSize > this.maxArtifactBytes) {
+                    throw new ArtifactPayloadError(
+                        `Artifact source exceeds the ${this.maxArtifactBytes} byte limit`
+                    )
+                }
+            }
+            await this.ensureBudget(item.runId, payloadSize - (entry.bytes || 0), entry)
+            let digest: string
+            if (item.sourcePath) {
+                // copyFile keeps multi-gigabyte payloads in the kernel copy path
+                // instead of a Node buffer.
+                await this.io.copyFile(item.sourcePath, temp)
+                await this.io.chmod(temp, 0o600).catch(() => undefined)
+                digest = await hashFile(temp)
+            } else {
+                const bytes = item.bytes!
+                await this.io.writeFile(temp, bytes, { flag: 'wx', mode: 0o600 })
+                await this.io.chmod(temp, 0o600).catch(() => undefined)
+                digest = sha256(bytes)
+            }
             await this.io.rename(temp, filePath)
             await this.io.chmod(filePath, 0o600).catch(() => undefined)
             // A synchronous record can replace the map entry while this write
@@ -751,22 +872,23 @@ export class ArtifactStore {
                 ...item.view,
                 storageStatus: 'available',
                 downloadable: true,
-                size: item.bytes.length,
-                sha256: sha256(item.bytes),
+                size: payloadSize,
+                sha256: digest,
                 storedAt: this.now(),
                 storageError: undefined
             }
             entry.view = nextView
             entry.filePath = filePath
             entry.durableView = nextView
-            this.totalBytes += delta
-            entry.bytes = item.bytes.length
+            this.totalBytes += payloadSize - (previousBytes || 0)
+            entry.bytes = payloadSize
+            if (item.signature) this.fileSignatures.set(key, item.signature)
             await this.writeManifest(item.runId)
             this.emit(item.runId, this.viewsForRun(item.runId))
             this.lastWriteMs = Math.max(0, performance.now() - startedAt)
         } catch (error) {
             await this.io.unlink(temp).catch(() => undefined)
-            if (error instanceof ArtifactBudgetError) {
+            if (error instanceof ArtifactBudgetError || error instanceof ArtifactPayloadError) {
                 const currentEntry = this.entries.get(key)
                 if (currentEntry) entry = currentEntry
                 if (previousPath && previousView?.storageStatus === 'available') {
@@ -790,7 +912,7 @@ export class ArtifactStore {
             }
             throw error
         } finally {
-            this.queuedBytes -= item.bytes.length
+            this.queuedBytes -= item.size
         }
     }
 
@@ -812,6 +934,7 @@ export class ArtifactStore {
 
     private async evict(entry: ArtifactEntry, reason: string) {
         if (this.isRunActive(entry.runId)) return
+        this.fileSignatures.delete(entryKey(entry.runId, entry.id))
         if (entry.filePath) await this.safeUnlink(entry.filePath)
         this.totalBytes -= entry.bytes || 0
         entry.bytes = undefined
@@ -847,6 +970,7 @@ export class ArtifactStore {
 
     private async expire(entry: ArtifactEntry) {
         if (this.isRunActive(entry.runId)) return
+        this.fileSignatures.delete(entryKey(entry.runId, entry.id))
         if (entry.filePath) await this.safeUnlink(entry.filePath)
         this.totalBytes -= entry.bytes || 0
         entry.bytes = undefined
@@ -1029,7 +1153,10 @@ export class ArtifactStore {
                 const bytes = Buffer.from(await handle.readFile())
                 return bytes.length <= maxBytes ? bytes : undefined
             }
-            const buffer = Buffer.alloc(maxBytes + 1)
+            // Allocate from the file's real size: the configured ceiling can be
+            // gigabytes, so pre-allocating it would defeat the streaming path.
+            const expected = stat ? Number(stat.size) : maxBytes
+            const buffer = Buffer.alloc(Math.min(expected, maxBytes) + 1)
             let offset = 0
             while (offset < buffer.length) {
                 const result = await handle.read(buffer, offset, buffer.length - offset, offset)
@@ -1079,16 +1206,16 @@ export class ArtifactStore {
             this.pending.set(item.runId, queue)
         }
         const old = queue.get(item.id)
-        if (old) this.queuedBytes -= old.bytes.length
+        if (old) this.queuedBytes -= old.size
         queue.set(item.id, item)
-        this.queuedBytes += item.bytes.length
+        this.queuedBytes += item.size
     }
 
     private removePending(runId: string, artifactId: string) {
         const queue = this.pending.get(runId)
         const item = queue?.get(artifactId)
         if (!item || !queue) return
-        this.queuedBytes -= item.bytes.length
+        this.queuedBytes -= item.size
         queue.delete(artifactId)
         if (!queue.size) this.pending.delete(runId)
     }
@@ -1110,6 +1237,22 @@ export class ArtifactStore {
 }
 
 export class ArtifactBudgetError extends Error {}
+
+/** A file-sourced payload that cannot be turned into a durable artifact. */
+export class ArtifactPayloadError extends Error {}
+
+/** Identity of a file-sourced payload, used to skip redundant re-copies. */
+function fileSignature(artifact: AgentdArtifact, size: number) {
+    const mtime = Number((artifact.metadata as Record<string, unknown> | undefined)?.mtimeMs)
+    return `${size}\u0000${Number.isFinite(mtime) ? mtime : ''}`
+}
+
+/** Streams a file through SHA-256 so a 2 GiB payload never enters memory. */
+async function hashFile(filePath: string): Promise<string> {
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer)
+    return hash.digest('hex')
+}
 
 export function artifactStorePathForRunStore(runStorePath: string) {
     return `${path.resolve(runStorePath)}.artifacts`
@@ -1168,7 +1311,19 @@ function normalizeView(value: AgentdRunArtifactView, now: number, fallback: stri
 }
 
 function payloadForArtifact(artifact: AgentdArtifact, maxBytes: number) {
+    // Inlined protocol payloads cannot approach the artifact ceiling: base64 of
+    // a multi-gigabyte file does not fit in a V8 string. Those must use
+    // `sourcePath`, which the store copies from disk instead.
+    const inlineBytes = Math.min(maxBytes, MAX_INLINE_ARTIFACT_BYTES)
     try {
+        if (typeof artifact.sourcePath === 'string' && artifact.sourcePath.trim()) {
+            const declared = Number((artifact.metadata as Record<string, unknown> | undefined)?.size)
+            const size = Number.isFinite(declared) && declared >= 0 ? declared : 0
+            if (size > maxBytes) {
+                return { error: `Artifact source exceeds the ${maxBytes} byte limit` }
+            }
+            return { sourcePath: artifact.sourcePath, size }
+        }
         if (typeof artifact.bytesBase64 === 'string') {
             const normalized = artifact.bytesBase64.replace(/\s+/g, '')
             if (
@@ -1178,15 +1333,21 @@ function payloadForArtifact(artifact: AgentdArtifact, maxBytes: number) {
             ) {
                 return { error: 'Invalid base64 artifact payload' }
             }
-            if (normalized.length > Math.ceil(maxBytes * 4 / 3) + 8) {
-                return { error: `Artifact exceeds the ${maxBytes} byte limit` }
+            if (normalized.length > Math.ceil(inlineBytes * 4 / 3) + 8) {
+                return {
+                    error: `Inlined artifact exceeds the ${inlineBytes} byte limit; publish the file instead`
+                }
             }
             const bytes = Buffer.from(normalized, 'base64')
             const canonical = bytes.toString('base64').replace(/=+$/, '')
             if (canonical !== normalized.replace(/=+$/, '')) {
                 return { error: 'Invalid base64 artifact payload' }
             }
-            if (bytes.length > maxBytes) return { error: `Artifact exceeds the ${maxBytes} byte limit` }
+            if (bytes.length > inlineBytes) {
+                return {
+                    error: `Inlined artifact exceeds the ${inlineBytes} byte limit; publish the file instead`
+                }
+            }
             return { bytes }
         }
         if (typeof artifact.text === 'string') {
@@ -1194,9 +1355,9 @@ function payloadForArtifact(artifact: AgentdArtifact, maxBytes: number) {
                 return { error: 'Text artifact exceeds the text snapshot limit' }
             }
             const bytes = Buffer.from(artifact.text, 'utf8')
-            return bytes.length <= maxBytes
+            return bytes.length <= inlineBytes
                 ? { bytes }
-                : { error: `Artifact exceeds the ${maxBytes} byte limit` }
+                : { error: `Artifact text exceeds the ${inlineBytes} byte limit` }
         }
         if (artifact.data !== undefined) {
             const data = artifact.data as any
@@ -1217,7 +1378,11 @@ function payloadForArtifact(artifact: AgentdArtifact, maxBytes: number) {
                 if (serialized === undefined) return { error: 'Artifact data is not serializable' }
                 bytes = Buffer.from(serialized, 'utf8')
             }
-            if (bytes.length > maxBytes) return { error: `Artifact exceeds the ${maxBytes} byte limit` }
+            if (bytes.length > inlineBytes) {
+                return {
+                    error: `Inlined artifact exceeds the ${inlineBytes} byte limit; publish the file instead`
+                }
+            }
             return { bytes }
         }
         return {}

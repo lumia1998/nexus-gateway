@@ -24,7 +24,7 @@
     "maxUploadBytesPerKey": 33554432
   },
   "history": { "maxRuns": 1000, "retentionDays": 30, "maxBytes": 67108864 },
-  "artifacts": { "retentionDays": 30, "maxBytes": 536870912, "maxArtifactBytes": 12582912, "maxQueuedBytes": 67108864 },
+  "artifacts": { "retentionDays": 7, "maxBytes": 68719476736, "maxArtifactBytes": 2147483648, "maxQueuedBytes": 8589934592 },
   "agents": {
     "custom": {
       "protocol": "acp",

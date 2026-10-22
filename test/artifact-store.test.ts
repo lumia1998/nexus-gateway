@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile as fsReadFile, rm, writeFile as fsWriteFile } from 'node:fs/promises'
+import { mkdtemp, readFile as fsReadFile, rm, stat, writeFile as fsWriteFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -220,6 +220,104 @@ test('retention expiration removes payloads but leaves run metadata', async () =
         await restarted.flush()
     } finally {
         await first.flush().catch(() => undefined)
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('copies a file-backed deliverable without inlining it as base64', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-artifact-file-source-'))
+    const store = new RunStore(path.join(directory, 'runs.json'), {
+        rootDir: path.join(directory, 'artifacts'),
+        maxArtifactBytes: 4 * 1024 * 1024
+    })
+    try {
+        await store.init()
+        const run = store.create(input('file source'))
+        const deliverable = path.join(directory, 'deliverable.bin')
+        // 3 MiB: far above the old 12 MiB/64 MiB inline ceilings is not needed
+        // here; what matters is the payload never passes through base64.
+        const bytes = Buffer.alloc(3 * 1024 * 1024, 0x5a)
+        await fsWriteFile(deliverable, bytes)
+        const stats = await stat(deliverable)
+        store.recordArtifacts(run.id, [
+            {
+                id: 'deliverable',
+                filename: 'deliverable.bin',
+                sourcePath: deliverable,
+                metadata: { size: bytes.length, mtimeMs: stats.mtimeMs }
+            }
+        ])
+        const queued = store.artifactViews(run.id)!
+        assert.equal(queued.find((item) => item.id === 'deliverable')?.storageStatus, 'pending')
+        await store.flush()
+        const view = store.artifactViews(run.id)!.find((item) => item.id === 'deliverable')!
+        assert.equal(view.storageStatus, 'available')
+        assert.equal(view.downloadable, true)
+        assert.equal(view.size, bytes.length)
+        assert.match(String(view.sha256), /^[a-f0-9]{64}$/)
+        assert.equal(JSON.stringify(view).includes(directory), false)
+
+        const read = await store.readArtifact(run.id, 'deliverable')
+        assert.equal(read?.bytes.length, bytes.length)
+        assert.equal(read?.bytes.subarray(0, 8).toString('hex'), '5a5a5a5a5a5a5a5a')
+
+        const streamed = await store.openArtifact(run.id, 'deliverable')
+        assert.ok(streamed)
+        assert.equal(streamed!.size, bytes.length)
+        let total = 0
+        for await (const chunk of streamed!.stream) total += Buffer.from(chunk).length
+        assert.equal(total, bytes.length)
+
+        // A session snapshot re-reports every artifact on each run update; an
+        // unchanged source must not be copied again.
+        store.recordArtifacts(run.id, [
+            {
+                id: 'deliverable',
+                filename: 'deliverable.bin',
+                sourcePath: deliverable,
+                metadata: { size: bytes.length, mtimeMs: stats.mtimeMs }
+            }
+        ])
+        assert.equal(store.metrics().artifactStoreStats.pendingWrites, 0)
+        assert.equal(store.metrics().artifactStoreStats.queuedBytes, 0)
+        assert.equal(
+            store.artifactViews(run.id)!.find((item) => item.id === 'deliverable')?.storageStatus,
+            'available'
+        )
+        await store.flush()
+    } finally {
+        await store.flush().catch(() => undefined)
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('refuses a file-backed deliverable above the artifact ceiling', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'nexus-artifact-file-limit-'))
+    const store = new RunStore(path.join(directory, 'runs.json'), {
+        rootDir: path.join(directory, 'artifacts'),
+        maxArtifactBytes: 8
+    })
+    try {
+        await store.init()
+        const run = store.create(input('file limit'))
+        const deliverable = path.join(directory, 'too-large.bin')
+        await fsWriteFile(deliverable, Buffer.alloc(64, 0x41))
+        store.recordArtifacts(run.id, [
+            {
+                id: 'too-large',
+                filename: 'too-large.bin',
+                sourcePath: deliverable,
+                metadata: { size: 64 }
+            }
+        ])
+        await store.flush()
+        const view = store.artifactViews(run.id)!.find((item) => item.id === 'too-large')!
+        assert.equal(view.storageStatus, 'metadata_only')
+        assert.equal(view.downloadable, false)
+        assert.match(String(view.storageError), /byte limit/)
+        assert.equal(await store.readArtifact(run.id, 'too-large'), undefined)
+    } finally {
+        await store.flush().catch(() => undefined)
         await rm(directory, { recursive: true, force: true })
     }
 })

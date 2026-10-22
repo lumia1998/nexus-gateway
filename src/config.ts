@@ -146,10 +146,10 @@ export async function loadAgentdConfig(filePath: string): Promise<AgentdConfig> 
             maxBytes: integerValue(history.maxBytes, 'history.maxBytes', 64 * 1024 * 1024, 1024, 1024 * 1024 * 1024)
         },
         artifacts: {
-            retentionDays: integerValue(artifacts.retentionDays, 'artifacts.retentionDays', 30, 1, 3650),
-            maxBytes: integerValue(artifacts.maxBytes, 'artifacts.maxBytes', 512 * 1024 * 1024, 1024, 1024 ** 4),
-            maxArtifactBytes: integerValue(artifacts.maxArtifactBytes, 'artifacts.maxArtifactBytes', 12 * 1024 * 1024, 1024, 12 * 1024 * 1024),
-            maxQueuedBytes: integerValue(artifacts.maxQueuedBytes, 'artifacts.maxQueuedBytes', 64 * 1024 * 1024, 1024, 512 * 1024 * 1024)
+            retentionDays: integerValue(artifacts.retentionDays, 'artifacts.retentionDays', 7, 1, 3650),
+            maxBytes: integerValue(artifacts.maxBytes, 'artifacts.maxBytes', 64 * 1024 ** 3, 1024, 1024 ** 4),
+            maxArtifactBytes: integerValue(artifacts.maxArtifactBytes, 'artifacts.maxArtifactBytes', 2 * 1024 ** 3, 1024, 2 * 1024 ** 3),
+            maxQueuedBytes: integerValue(artifacts.maxQueuedBytes, 'artifacts.maxQueuedBytes', 8 * 1024 ** 3, 1024, 64 * 1024 ** 3)
         },
         maxRequestBytes: integerValue(
             value.maxRequestBytes,

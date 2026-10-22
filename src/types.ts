@@ -274,6 +274,12 @@ export interface AgentdArtifact {
     mediaType?: string
     data?: unknown
     bytesBase64?: string
+    /**
+     * Host path whose bytes the gateway copies into the artifact store. Used for
+     * deliverables that are too large to inline as base64 (published workspaces
+     * files, `MEDIA:` markers). Never serialized into a session or run view.
+     */
+    sourcePath?: string
     metadata?: Record<string, unknown>
 }
 

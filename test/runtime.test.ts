@@ -184,21 +184,20 @@ test('captures a Hermes MEDIA marker as an artifact before completing the turn',
         assert.equal(sink.output, 'PPT 已完成。')
         assert.equal(sink.artifacts.length, 1)
         assert.match(sink.artifacts[0].id, /^media:/)
-        assert.deepEqual(
-            { ...sink.artifacts[0], id: undefined },
-            {
-                id: undefined,
-                name: 'wangjunkai.pptx',
-                filename: 'wangjunkai.pptx',
-                mediaType:
-                    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-                bytesBase64: Buffer.from('pptx-bytes').toString('base64'),
-                metadata: {
-                    source: 'acp_media_marker',
-                    size: 10
-                }
-            }
+        const artifact = sink.artifacts[0]
+        assert.equal(artifact.name, 'wangjunkai.pptx')
+        assert.equal(artifact.filename, 'wangjunkai.pptx')
+        assert.equal(
+            artifact.mediaType,
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation'
         )
+        // Deliverables are copied from disk by the artifact store: the marker
+        // must not be inlined as base64, and the client downloads the payload.
+        assert.equal(artifact.bytesBase64, undefined)
+        assert.equal(artifact.sourcePath, await realpath(file))
+        assert.equal(artifact.metadata?.source, 'acp_media_marker')
+        assert.equal(artifact.metadata?.size, 10)
+        assert.match(String(artifact.description), /artifacts\/\{artifactId\}/)
         assert.equal(sink.events.some((event) => event.type === 'artifact'), true)
     } finally {
         await rm(directory, { recursive: true, force: true })

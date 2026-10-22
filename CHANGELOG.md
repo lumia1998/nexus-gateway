@@ -2,6 +2,23 @@
 
 本项目遵循语义化版本，记录 Nexus Gateway 面向使用者的重要变化。
 
+## [0.6.0] - 2026-10-23
+
+### 产物
+- 单个产物上限从 12 MiB 提到 **2 GiB**，保留期默认从 30 天改为 **7 天**；总量默认 64 GiB、排队
+  8 GiB。契约上不再有 `Math.min(12 MiB, …)` 这类隐式封顶，`artifacts.maxArtifactBytes` 的可配置
+  上限本身就是 2 GiB（`artifacts.maxQueuedBytes` 下限自动抬到单项上限）。
+- 大数据量产物改走文件通道：工作区发布与 `MEDIA:` 声明只做 stat 级的包含性校验（`statContainedFile`），
+  产物由 store 在 flush 时用 `fs.copyFile` 复制并流式算 SHA-256，不再拼 base64。ACP 协议内联的
+  `bytesBase64`/文本仍限制在 64 MiB —— base64 字符串本身装不进 JSON-RPC 帧。
+- 下载接口改为流式（`ArtifactStreamResult`）：`GET /v1/runs/:runId/artifacts/:artifactId` 直接
+  pipe 文件，不再把整个 payload 读成 Buffer；`readRegularFile` 的分配也从「配置上限 + 1」改为
+  「真实文件大小 + 1」，避免上限提到 2 GiB 后每次读取预分配 2 GiB。
+- 发布接口的响应不再内联 base64（`publishedArtifacts` 只带元数据与 `description` 指向下载端点），
+  且继续不暴露宿主机绝对路径：内部 `sourcePath` 字段只用于复制，序列化前被剥离。
+- 会话快照会重复上报所有产物，因此新增按「源文件大小 + mtime」的签名去重：同一份未改动的文件不会被
+  重复复制（多 GB 文件在每次 run 更新时重拷一遍是不可接受的）。
+
 ## [0.5.1] - 2026-10-12
 
 - 非回环监听且管理 Cookie 未启用 `Secure` 时，CLI 在每次启动提示纯 HTTP 传输风险，以及 HTTPS 反代、

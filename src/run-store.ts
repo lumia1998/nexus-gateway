@@ -7,6 +7,7 @@ import {
     type ArtifactReadResult,
     type ArtifactStoreMetrics,
     type ArtifactStoreOptions,
+    type ArtifactStreamResult,
     type StoredArtifactView
 } from './artifact-store.js'
 import type {
@@ -25,6 +26,7 @@ export {
 } from './artifact-store.js'
 export type {
     ArtifactReadResult,
+    ArtifactStreamResult,
     ArtifactStorageStatus,
     ArtifactStoreMetrics,
     ArtifactStoreIo,
@@ -331,6 +333,16 @@ export class RunStore {
         this.assertInitialized()
         if (!this.runs.has(runId)) return undefined
         return this.artifactStore.readArtifact(runId, artifactId)
+    }
+
+    /** Stream a payload instead of buffering it; used by the download route. */
+    async openArtifact(
+        runId: string,
+        artifactId: string
+    ): Promise<ArtifactStreamResult | undefined> {
+        this.assertInitialized()
+        if (!this.runs.has(runId)) return undefined
+        return this.artifactStore.openArtifact(runId, artifactId)
     }
 
     /** Flat, newest-first artifact index across all retained runs. */

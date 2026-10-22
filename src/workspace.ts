@@ -72,7 +72,8 @@ export interface ContainedFile {
     path: string
     relative: string
     filename: string
-    bytes: Buffer
+    /** Present only for {@link readContainedFile}; the stat variant never loads bytes. */
+    bytes?: Buffer
     size: number
 }
 
@@ -94,6 +95,37 @@ export async function readContainedFile(
     requested: string,
     options: { maxBytes: number }
 ): Promise<ContainedFile> {
+    const target = await resolveContainedTarget(roots, requested, options.maxBytes)
+    try {
+        const bytes = await target.handle.readFile()
+        return { ...target.file, bytes, size: bytes.length }
+    } finally {
+        await target.handle.close().catch(() => undefined)
+    }
+}
+
+/**
+ * Stats a file that must resolve inside one of `roots` without loading it.
+ *
+ * Deliverables may be far larger than a base64 payload can carry, so the
+ * artifact store copies them from disk instead of inlining them. This is that
+ * path's containment check: identical allowlist and swap detection, no buffer.
+ */
+export async function statContainedFile(
+    roots: readonly string[],
+    requested: string,
+    options: { maxBytes: number }
+): Promise<ContainedFile> {
+    const target = await resolveContainedTarget(roots, requested, options.maxBytes)
+    await target.handle.close().catch(() => undefined)
+    return target.file
+}
+
+async function resolveContainedTarget(
+    roots: readonly string[],
+    requested: string,
+    maxBytes: number
+): Promise<{ handle: Awaited<ReturnType<typeof open>>; file: ContainedFile }> {
     if (!roots.length) {
         throw new ContainedReadError('outside', 'no workspace root is configured')
     }
@@ -116,23 +148,25 @@ export async function readContainedFile(
         if (!stats.isFile()) {
             throw new ContainedReadError('not-a-file', 'path is not a regular file')
         }
-        if (stats.size > options.maxBytes) {
+        if (stats.size > maxBytes) {
             throw new ContainedReadError(
                 'too-large',
-                `file exceeds the ${options.maxBytes} byte limit`
+                `file exceeds the ${maxBytes} byte limit`
             )
         }
-        const bytes = await handle.readFile()
         return {
-            root,
-            path: verified,
-            relative: path.relative(root, verified).split(path.sep).join('/'),
-            filename: path.basename(verified),
-            bytes,
-            size: bytes.length
+            handle,
+            file: {
+                root,
+                path: verified,
+                relative: path.relative(root, verified).split(path.sep).join('/'),
+                filename: path.basename(verified),
+                size: stats.size
+            }
         }
-    } finally {
-        await handle?.close()
+    } catch (error) {
+        await handle?.close().catch(() => undefined)
+        throw error
     }
 }
 

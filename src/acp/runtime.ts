@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,7 +15,7 @@ import type {
     AgentdPendingResponse
 } from '../types.js'
 import { TURN_COMPLETION_CONTRACT } from '../completion-contract.js'
-import { readContainedFile } from '../workspace.js'
+import { readContainedFile, statContainedFile } from '../workspace.js'
 
 interface PendingPermission {
     request: AgentdPendingRequest
@@ -37,7 +37,11 @@ type FormElicitation = acp.CreateElicitationRequest & {
 }
 
 // Matches MAX_PUBLISHED_FILE_BYTES in session.ts; larger files are encoded only to be dropped by the base64 budget.
-const MAX_MEDIA_MARKER_FILE_BYTES = 12 * 1024 * 1024
+/**
+ * `MEDIA:` deliverables are copied by the artifact store instead of being
+ * base64-inlined, so this ceiling matches the artifact ceiling (2 GiB).
+ */
+const MAX_MEDIA_MARKER_FILE_BYTES = 2 * 1024 ** 3
 // The agent controls how many markers it emits, so bound the reads per turn.
 const MAX_MEDIA_MARKER_ARTIFACTS = 8
 
@@ -906,18 +910,25 @@ async function artifactFromMediaMarker(
     }
 
     const localPath = marker.startsWith('file:') ? fileURLToPath(marker) : marker
-    const file = await readContainedFile(roots, localPath, {
+    // Stat only: the artifact store copies the file from disk, which keeps a
+    // multi-gigabyte deliverable out of the base64/JSON-RPC path.
+    const file = await statContainedFile(roots, localPath, {
         maxBytes: MAX_MEDIA_MARKER_FILE_BYTES
     })
+    const stats = await stat(file.path)
     return {
         id,
         name: file.filename,
         filename: file.filename,
         mediaType: mediaTypeForPath(file.filename),
-        bytesBase64: file.bytes.toString('base64'),
+        description:
+            'Payload is stored by the gateway; download it from ' +
+            'GET /v1/runs/{runId}/artifacts/{artifactId}.',
+        sourcePath: file.path,
         metadata: {
             source: 'acp_media_marker',
-            size: file.size
+            size: file.size,
+            mtimeMs: stats.mtimeMs
         }
     }
 }

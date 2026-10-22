@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
+import type { Readable } from 'node:stream'
 import { AdminSessionStore } from './auth.js'
 import { streamSessionEvents } from './server/connection.js'
 import {
@@ -1152,6 +1153,30 @@ async function writeRunArtifact(
         ? run.artifacts.find((value: any) => value?.id === artifactId)
         : undefined
     if (!artifact) throw new RequestError(404, 'Artifact not found')
+    // Stream the payload: artifacts can be gigabytes, so buffering one to hand
+    // it to a socket would exhaust the gateway's heap.
+    const streaming = (typeof sessions.openRunArtifact === 'function'
+        ? await sessions.openRunArtifact(run.id, artifactId)
+        : undefined) as
+        | { stream: Readable; size: number; filename?: string; mediaType?: string }
+        | undefined
+    if (streaming) {
+        const name = safeDownloadFilename(
+            streaming.filename || artifact.filename || artifact.name || artifactId
+        )
+        const type = cleanMediaType(streaming.mediaType || artifact.mediaType)
+        response.writeHead(200, {
+            'Content-Type': type,
+            'Content-Length': streaming.size,
+            'Content-Disposition': contentDisposition(name),
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff'
+        })
+        streaming.stream.on('error', () => response.destroy())
+        response.on('close', () => streaming.stream.destroy())
+        streaming.stream.pipe(response)
+        return
+    }
     const payload = await resolveArtifactPayload(sessions, run.id, artifactId)
     if (!payload) throw new RequestError(404, 'Artifact bytes are unavailable')
     const filename = safeDownloadFilename(payload.filename || artifact.filename || artifact.name || artifactId)

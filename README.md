@@ -236,26 +236,33 @@ link；A2A 则以带文件名和媒体类型的二进制 Part 发送。
 ### 产物
 
 ACP Session 支持显式发布工作区文件。发布接口只接受 realpath 仍位于该 Session 工作区中的普通文件，
-拒绝目录、路径穿越和符号链接逃逸，单个文件最多 12 MiB。请求 body 支持单文件 `{ "path": "..." }` 或
+拒绝目录、路径穿越和符号链接逃逸，单个文件最多 2 GiB。请求 body 支持单文件 `{ "path": "..." }` 或
 批量 `{ "paths": ["..."] }`（一次最多 32 条），响应在正常 Session 视图上附加 `publishedArtifacts`
-数组，本次发布的文件以 base64 内联返回；不会暴露宿主机绝对路径，也不生成外部 URL。
+数组。发布的文件由 Gateway 从磁盘复制进产物存储，不再以 base64 内联返回（大文件在 JSON 里放不下）；
+客户端用 `GET /v1/runs/:runId/artifacts/:artifactId` 下载，响应不暴露宿主机绝对路径，也不生成外部 URL。
 
 Agent 也可以在最终文本里用 `MEDIA:<path>` 行声明交付文件，Gateway 在该轮完成前把它们快照为 Artifact，
 已处理的 `MEDIA:` 行不会出现在最终输出里。这条路径的边界是配置的 `workspaceRoots`，比发布接口的
 Session 工作区更宽——Agent 常把交付文件写在工作区旁边的 skill 目录，该目录必须在 `workspaceRoots` 内
-才会被附加。单轮最多 8 个文件、单个文件最多 12 MiB；越界路径（含 `file://` 形式）被拒绝，原因写入
+才会被附加。单轮最多 8 个文件、单个文件最多 2 GiB；越界路径（含 `file://` 形式）被拒绝，原因写入
 Session 事件流，该轮仍正常完成。
 
 产物有可用内容时持久化到运行历史文件旁的 `.artifacts` 目录；仅有远端 URL 的产物保留元数据，不主动
 下载。详情中的 `downloadable` 和 `storageStatus` 表示下载状态。下载需要身份验证，不能将链接作为公开
 分享地址。
 
+payload 有两条通道：ACP 协议内联的 `bytesBase64`/文本最多 64 MiB（base64 字符串放不进 JSON-RPC
+帧，再大也没有意义）；工作区发布与 `MEDIA:` 声明走文件通道，Gateway 在 flush 时用 `copyFile`
+把文件复制进产物目录并流式算 SHA-256，多 GB 的交付文件不经过内存或 base64。下载接口按流式返回，
+不会把整个 payload 读进内存。
+
 ### 配额与保留
 
 本地配置的 `quotas` 设置每 Key 的 Session、运行任务、SSE 和上传字节限制，默认分别为 16、4、8、
 32 MiB，连接数量默认也受全局上限约束。`history` 默认保留 1000 条、30 天、64 MiB；`artifacts` 默认
-保留 30 天、总量 512 MiB、单项 12 MiB、排队内容 64 MiB。活动任务受保护，因此历史预算不是强制截断
-活动记录的硬上限。完整字段见 `nexus-agentd.example.json`。
+保留 7 天、总量 64 GiB、单项 2 GiB、排队内容 8 GiB（排队下限自动抬到单项上限，保证一个满额产物能进
+队列）。活动任务受保护，因此历史预算不是强制截断活动记录的硬上限。完整字段见
+`nexus-agentd.example.json`。
 
 运行记录保存在配置文件同目录的 `nexus-agentd-runs.json` sidecar 中。记录文件使用 `0600` 权限和原子
 替换；进行中的任务若遇到 Gateway 重启，会在下次启动时标记为「已中断/失败」，而不会一直显示为运行中。

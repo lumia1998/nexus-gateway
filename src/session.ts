@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { stat } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime } from './a2a/runtime.js'
@@ -38,7 +39,7 @@ import type {
 } from './types.js'
 import {
     ContainedReadError,
-    readContainedFile,
+    statContainedFile,
     type WorkspacePolicy
 } from './workspace.js'
 
@@ -48,7 +49,11 @@ const MAX_SESSION_BASE64_CHARS = 32 * 1024 * 1024
 const MAX_INPUT_ATTACHMENTS = 16
 const MAX_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
 const MAX_SESSION_INPUT_BYTES = 32 * 1024 * 1024
-const MAX_PUBLISHED_FILE_BYTES = 12 * 1024 * 1024
+/**
+ * Published deliverables are copied by the artifact store, not base64-inlined,
+ * so the session only enforces the artifact ceiling here.
+ */
+const MAX_PUBLISHED_FILE_BYTES = 2 * 1024 ** 3
 
 /** Optional durable sink for full artifact snapshots. */
 export interface SessionArtifactStore {
@@ -294,7 +299,9 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             seen.add(requestedPath)
             artifacts.push(await this.publishSingleFile(requestedPath))
         }
-        return artifacts
+        // Return the public view: `sourcePath` is a host path the client must
+        // never see, and the payload is downloaded from the artifact endpoint.
+        return artifacts.map((artifact) => runArtifact(artifact))
     }
 
     private async publishSingleFile(requestedPath: string) {
@@ -304,19 +311,27 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             // again here would hand the trust decision back to the file system,
             // so a workspace replaced by a link after creation would silently
             // become the new root and publish would read outside the allowlist.
-            const file = await readContainedFile([this.workspace!], requestedPath, {
+            // Stat only: a published file can be gigabytes, so the artifact
+            // store copies it from disk and the base64 path stays for small
+            // protocol payloads.
+            const file = await statContainedFile([this.workspace!], requestedPath, {
                 maxBytes: MAX_PUBLISHED_FILE_BYTES
             })
+            const stats = await stat(file.path)
             const artifact: AgentdArtifact = {
                 id: `published:${randomUUID()}`,
                 name: file.filename,
                 filename: file.filename,
                 mediaType: mediaTypeForPath(file.filename),
-                bytesBase64: file.bytes.toString('base64'),
+                description:
+                    'Payload is stored by the gateway; download it from ' +
+                    'GET /v1/runs/{runId}/artifacts/{artifactId}.',
+                sourcePath: file.path,
                 metadata: {
                     source: 'workspace_publish',
                     path: file.relative,
-                    size: file.size
+                    size: file.size,
+                    mtimeMs: stats.mtimeMs
                 }
             }
             this.addArtifact(artifact)
@@ -854,6 +869,19 @@ export class SessionManager {
 
     getStorageMetrics(): ReturnType<RunStore['metrics']> | undefined {
         return this.runStore?.metrics()
+    }
+
+    async openRunArtifact(runId: string, artifactId: string) {
+        this.getRun(runId)
+        const store = this.runStore as
+            | (RunStore & {
+                  openArtifact?: (
+                      runId: string,
+                      artifactId: string
+                  ) => Promise<unknown> | unknown
+              })
+            | undefined
+        return store?.openArtifact?.(runId, artifactId)
     }
 
     async readRunArtifact(runId: string, artifactId: string) {

@@ -18,10 +18,10 @@ export async function startAgentd(configPath: string) {
             maxTaskChars: config.maxRequestBytes,
             historyRetentionDays: config.history?.retentionDays ?? 30,
             historyMaxBytes: config.history?.maxBytes ?? 64 * 1024 * 1024,
-            retentionDays: config.artifacts?.retentionDays ?? 30,
-            maxTotalBytes: config.artifacts?.maxBytes ?? 512 * 1024 * 1024,
-            maxArtifactBytes: config.artifacts?.maxArtifactBytes ?? 12 * 1024 * 1024,
-            maxQueuedBytes: config.artifacts?.maxQueuedBytes ?? 64 * 1024 * 1024
+            retentionDays: config.artifacts?.retentionDays ?? 7,
+            maxTotalBytes: config.artifacts?.maxBytes ?? 64 * 1024 ** 3,
+            maxArtifactBytes: config.artifacts?.maxArtifactBytes ?? 2 * 1024 ** 3,
+            maxQueuedBytes: config.artifacts?.maxQueuedBytes ?? 8 * 1024 ** 3
         }
     )
     await runStore.init()

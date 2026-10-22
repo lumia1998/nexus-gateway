@@ -16,12 +16,13 @@ test('publishes regular workspace files without exposing the absolute path', asy
     try {
         const artifact = await session.publishFile('dist/report.md')
         assert.equal(artifact.filename, 'report.md')
-        assert.equal(artifact.bytesBase64, Buffer.from('# report').toString('base64'))
-        assert.deepEqual(artifact.metadata, {
-            source: 'workspace_publish',
-            path: 'dist/report.md',
-            size: 8
-        })
+        // The payload is copied from disk by the artifact store, so publish no
+        // longer inlines base64 and never reports the host path.
+        assert.equal(artifact.bytesBase64, undefined)
+        assert.equal(artifact.sourcePath, undefined)
+        assert.equal(artifact.metadata?.source, 'workspace_publish')
+        assert.equal(artifact.metadata?.path, 'dist/report.md')
+        assert.equal(artifact.metadata?.size, 8)
         // JSON escaping doubles every backslash, so compare against the escaped
         // form; the raw path can never appear in the serialized artifact.
         const escapedDirectory = JSON.stringify(directory).slice(1, -1)
