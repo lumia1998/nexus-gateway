@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -197,10 +197,13 @@ test('durable uncertain dispatch never replays and workspace file callbacks reje
         release(); await active
         const duplicate = await new McpDispatchStore(file).once('owner', 'request-id', { message: 'task' }, async () => { throw new Error('must not run') })
         assert.equal(duplicate.task_id, 'task')
-        await assert.rejects(writeAcpText(directory, '../outside.txt', 'no'), /outside/)
-        await writeAcpText(directory, 'text.txt', 'one\ntwo\nthree')
-        assert.deepEqual(await readAcpText(directory, 'text.txt', 2, 1), { content: 'two' })
-        await assert.rejects(readAcpText(directory, '../outside.txt'), /outside|ENOENT/)
+        // Match SessionManager's canonical workspace contract. Windows runners may
+        // spell TEMP differently from realpath (drive casing / short aliases).
+        const canonicalWorkspace = await realpath(directory)
+        await assert.rejects(writeAcpText(canonicalWorkspace, '../outside.txt', 'no'), /outside/)
+        await writeAcpText(canonicalWorkspace, 'text.txt', 'one\ntwo\nthree')
+        assert.deepEqual(await readAcpText(canonicalWorkspace, 'text.txt', 2, 1), { content: 'two' })
+        await assert.rejects(readAcpText(canonicalWorkspace, '../outside.txt'), /outside|ENOENT/)
     } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
