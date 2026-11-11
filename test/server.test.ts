@@ -187,7 +187,7 @@ test('Console Cookie and client API Keys are separate, with upgrade-safe bootstr
                 'openclaw',
                 'hermes',
                 'dsh',
-                'grok'
+                'grok', 'kimi', 'gemini', 'cursor', 'devin', 'zcode', 'minimax', 'antigravity', 'codex-cli'
             ],
                 sessionTtlMs: 48 * 60 * 60 * 1000,
                 promptTimeoutMs: 20 * 60 * 1000,

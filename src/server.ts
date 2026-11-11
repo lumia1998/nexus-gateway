@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { McpTasks } from './mcp/tasks.js'
+import { handleMcpRequest } from './mcp/server.js'
+import { parseSessionOptions } from './runtime-options.js'
+import type { AgentdSessionView } from './types.js'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Readable } from 'node:stream'
 import { AdminSessionStore } from './auth.js'
@@ -102,6 +106,7 @@ export function createAgentdServer(
     const sessionReservations = new Map<string, () => void>()
     const uploadReservations = new Map<string, () => void>()
     const runReservations = new Map<string, () => void>()
+    const mcpTasks = new McpTasks(sessions, quota, { sessions: sessionReservations, runs: runReservations })
     // SessionManager emits terminal run transitions independently of HTTP
     // requests. Release the per-key running slot at that boundary so an
     // asynchronous completion cannot strand a quota reservation until the
@@ -160,6 +165,7 @@ export function createAgentdServer(
             quota,
             metrics,
             diagnostics,
+            mcpTasks,
             sessionReservations,
             uploadReservations,
             runReservations,
@@ -239,6 +245,7 @@ interface RequestContext {
     quota: QuotaManager
     metrics: GatewayMetrics
     diagnostics: DiagnosticRunner
+    mcpTasks: McpTasks
     sessionReservations: Map<string, () => void>
     uploadReservations: Map<string, () => void>
     runReservations: Map<string, () => void>
@@ -260,6 +267,27 @@ async function handleRequest(context: RequestContext) {
         response
     } = context
     const url = new URL(request.url || '/', 'http://localhost')
+    if (url.pathname === '/mcp') {
+        assertConsoleHost(request, config)
+        if (request.headers.origin !== undefined) assertTrustedOrigin(request, config)
+        if (!isInitialized(config, controlPlane)) throw new RequestError(428, 'Gateway setup is required')
+        const principal = authenticateApiKey(request, config, controlPlane, apiLimiter)
+        if (request.method !== 'POST') {
+            response.setHeader('Allow', 'POST')
+            writeJson(response, 405, { error: 'Stateless Streamable HTTP accepts POST; no standalone event stream or MCP session to delete' })
+            return
+        }
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        const release = context.acquireSse(principal.id)
+        if (!release) throw new RequestError(429, 'MCP connection capacity reached')
+        try {
+            await handleMcpRequest(request, response, body, context.mcpTasks, {
+                principal: () => authenticateApiKey(request, config, controlPlane, apiLimiter)
+            })
+        } finally { release() }
+        return
+    }
     if (url.pathname === '/' || url.pathname.startsWith('/ui') || url.pathname.startsWith('/v1/admin/') || url.pathname.startsWith('/v1/bootstrap/')) {
         assertConsoleHost(request, config)
     }
@@ -397,10 +425,31 @@ async function handleRequest(context: RequestContext) {
         await writeRunArtifact(response, sessions, run, artifactId)
         return
     }
+    const dataRunMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/(resume))?$/)
+    if (dataRunMatch) {
+        const runId = decodeURIComponent(dataRunMatch[1])
+        const run = await getRunForDataPlane(sessions, runId, principal.id)
+        assertAgentScope(principal, run.agentId)
+        if (!dataRunMatch[2] && request.method === 'GET') {
+            writeJson(response, 200, run)
+            return
+        }
+        if (dataRunMatch[2] === 'resume' && request.method === 'POST') {
+            await assertEmptyJsonBody(request, config.maxRequestBytes)
+            let release = () => {}
+            try {
+                const restored = await sessions.resumeRun(runId, principal.id, () => (release = context.quota.reserveSession(principal.id)))
+                if (context.sessionReservations.has(restored.id)) release()
+                else context.sessionReservations.set(restored.id, release)
+                writeJson(response, 200, restored)
+            } catch (error) { release(); throw error }
+            return
+        }
+    }
     if (url.pathname === '/v1/sessions' && request.method === 'POST') {
         assertJsonContentType(request)
         const body = await readJsonBody(request, config.maxRequestBytes)
-        assertOnlyKeys(body, ['agentId', 'workspace'])
+        assertOnlyKeys(body, ['agentId', 'workspace', 'options'])
         const agentId = requiredString(body.agentId, 'agentId')
         assertAgentScope(principal, agentId)
         // Reserve before the asynchronous startup path.  The reservation is
@@ -411,7 +460,8 @@ async function handleRequest(context: RequestContext) {
             const created = await sessions.create(
                 agentId,
                 optionalString(body.workspace),
-                principal.id
+                principal.id,
+                readSessionOptions(body.options)
             )
             context.sessionReservations.set(created.id, releaseSession)
             writeJson(response, 201, created)
@@ -534,7 +584,7 @@ async function handleRequest(context: RequestContext) {
     }
 
     const match = url.pathname.match(
-        /^\/v1\/sessions\/([^/]+)(?:\/(message|cancel|events))?$/
+        /^\/v1\/sessions\/([^/]+)(?:\/(message|cancel|events|options))?$/
     )
     if (!match) throw new RequestError(404, 'Route not found')
     const sessionId = decodeURIComponent(match[1])
@@ -555,6 +605,12 @@ async function handleRequest(context: RequestContext) {
         releaseSessionReservations(context, sessionId)
         releaseRunReservation(context, sessionId)
         writeJson(response, 200, closed)
+        return
+    }
+    if (action === 'options' && request.method === 'PATCH') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        writeJson(response, 200, await sessions.configure(sessionId, readSessionOptions(body)))
         return
     }
     if (action === 'message' && request.method === 'POST') {
@@ -617,6 +673,75 @@ async function handleAdminRoute(context: RequestContext, url: URL) {
     } = context
     if (!controlPlane) throw new RequestError(404, 'Control plane is unavailable')
 
+    if (url.pathname === '/v1/admin/runs' && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['agentId', 'workspace', 'message', 'options'])
+        const message = requiredMessage(body.message)
+        const owner = 'console:tasks'
+        const release = context.quota.reserveSession(owner)
+        let created: AgentdSessionView | undefined
+        try {
+            created = await sessions.create(requiredString(body.agentId, 'agentId'), optionalString(body.workspace), owner, readSessionOptions(body.options))
+            context.sessionReservations.set(created.id, release)
+            const runRelease = context.quota.reserveRunningRun(owner, created.id)
+            context.runReservations.set(created.id, runRelease)
+            const result = await sessions.message(created.id, message)
+            reconcileRunReservation(context, owner, created.id, result.state)
+            writeJson(response, 202, result)
+        } catch (error) {
+            release()
+            if (created) {
+                releaseRunReservation(context, created.id)
+                await sessions.close(created.id).catch(() => undefined)
+                context.sessionReservations.delete(created.id)
+            }
+            throw error
+        }
+        return
+    }
+    const capabilitiesMatch = url.pathname.match(/^\/v1\/admin\/agents\/([^/]+)\/capabilities$/)
+    if (capabilitiesMatch && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['workspace'])
+        const created = await sessions.create(decodeURIComponent(capabilitiesMatch[1]), optionalString(body.workspace), 'console:diagnostic')
+        try { writeJson(response, 200, created.runtime || { options: {}, configOptions: [] }) }
+        finally { await sessions.close(created.id) }
+        return
+    }
+    const continueMatch = url.pathname.match(/^\/v1\/admin\/runs\/([^/]+)\/continue$/)
+    if (continueMatch && request.method === 'POST') {
+        assertJsonContentType(request)
+        const body = await readJsonBody(request, config.maxRequestBytes)
+        assertOnlyKeys(body, ['message', 'options'])
+        const message = requiredMessage(body.message)
+        const runId = decodeURIComponent(continueMatch[1])
+        const owner = sessions.getRunOwnerKeyId(runId)
+        if (!owner) throw new RequestError(404, 'Run not found')
+        let release = () => {}
+        let restored: AgentdSessionView | undefined
+        let added = false
+        try {
+            restored = await sessions.resumeRun(runId, undefined, () => (release = context.quota.reserveSession(owner)))
+            if (context.sessionReservations.has(restored.id)) release()
+            else { added = true; context.sessionReservations.set(restored.id, release) }
+            if (body.options) await sessions.configure(restored.id, readSessionOptions(body.options))
+            const releaseRun = context.quota.reserveRunningRun(owner, restored.id)
+            context.runReservations.set(restored.id, releaseRun)
+            const result = await sessions.message(restored.id, message)
+            reconcileRunReservation(context, owner, restored.id, result.state)
+            writeJson(response, 202, result)
+        } catch (error) {
+            release()
+            if (restored) {
+                releaseRunReservation(context, restored.id)
+                if (added) { await sessions.close(restored.id).catch(() => undefined); context.sessionReservations.delete(restored.id) }
+            }
+            throw error
+        }
+        return
+    }
     if (url.pathname === '/v1/admin/overview' && request.method === 'GET') {
         const agents = await sessions.listAgents(undefined, url.searchParams.get('refresh') === '1')
         writeJson(response, 200, { agents, sessions: sessions.count() })
@@ -1347,6 +1472,10 @@ function isRecord(value: unknown): value is Record<string, any> {
     return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+function readSessionOptions(input: unknown) {
+    try { return parseSessionOptions(input) } catch (error) { throw new RequestError(400, errorMessage(error)) }
+}
+
 function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
     assertOnlyKeys(body, [
         'protocol',
@@ -1365,7 +1494,7 @@ function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
         'authHeaderName',
         'timeoutMs',
         'taskTimeoutMs',
-        'streamIdleTimeoutMs'
+        'streamIdleTimeoutMs', 'model', 'effort', 'mode', 'startupTimeoutMs', 'stallTimeoutMs', 'idleUnloadMs', 'resumeMethod'
     ])
     return {
         protocol: requiredString(body.protocol, 'protocol') as AgentdProtocol,
@@ -1376,6 +1505,13 @@ function readAgentUpdate(body: Record<string, unknown>): AgentdAgentUpdate {
         workspace: optionalString(body.workspace),
         permissionPolicy: optionalString(body.permissionPolicy) as PermissionPolicy | undefined,
         permissionTimeoutMs: optionalNumber(body.permissionTimeoutMs, 'permissionTimeoutMs'),
+        model: body.model === '' ? '' : optionalString(body.model),
+        effort: body.effort === '' ? '' : optionalString(body.effort),
+        mode: body.mode === '' ? '' : optionalString(body.mode),
+        startupTimeoutMs: optionalNumber(body.startupTimeoutMs, 'startupTimeoutMs'),
+        stallTimeoutMs: optionalNumber(body.stallTimeoutMs, 'stallTimeoutMs'),
+        idleUnloadMs: optionalNumber(body.idleUnloadMs, 'idleUnloadMs'),
+        resumeMethod: optionalString(body.resumeMethod) as AgentdAgentUpdate['resumeMethod'],
         agentCardUrl: optionalString(body.agentCardUrl),
         agentUrl: optionalString(body.agentUrl),
         preferredTransport: optionalString(body.preferredTransport) as AgentdAgentUpdate['preferredTransport'],

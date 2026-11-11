@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { radixTokens } from './radix-tokens.mjs'
 
 const dir = fileURLToPath(new URL('../src/webui/app/', import.meta.url))
 const outFile = fileURLToPath(new URL('../src/webui/app/sources.ts', import.meta.url))
@@ -28,7 +29,7 @@ for (const name of names) {
 out = out.replace(/,\n$/, '\n') + `}\n`
 fs.writeFileSync(outFile, out)
 
-const css = read(cssFile)
+const css = radixTokens() + '\n' + read(cssFile)
 if (css.includes('`') || css.includes('${')) {
     throw new Error(
         'src/webui/styles.css must not contain a backtick or ${ so it can be emitted as a String.raw template'

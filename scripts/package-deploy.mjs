@@ -38,7 +38,7 @@ const requiredFiles = [
     'deploy/nexus-agentd.service',
     'scripts/deploy-remote-install.sh'
 ]
-const optionalFiles = ['README.md', 'LICENSE', 'deploy-manual.md', 'examples']
+const optionalFiles = ['README.md', 'RUNTIME.md', 'MCP.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'deploy-manual.md', 'examples']
 for (const relative of requiredFiles) await assertExists(path.join(workspace, relative))
 
 const includedFiles = [...requiredFiles, ...optionalFiles].filter((relative) =>

@@ -2,9 +2,13 @@
 
 [![CI](https://github.com/lumia1998/nexus-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/lumia1998/nexus-gateway/actions/workflows/ci.yml)
 
-`nexus-agentd` 是一个单进程的本地 Agent 网关。它把本机上的 ACP 进程和远程 A2A Agent 统一管理起来，
+`nexus-agentd` 是一个单进程的 Agent 网关。它把本机 ACP / 原生 CLI 进程和远程 A2A Agent 统一管理起来，
 通过 HTTP/SSE 向 Koishi AgentNexus 等客户端提供一致的会话、消息、事件、权限、取消和产物接口，
 并内置一个不依赖 CDN、前端框架或父仓库的管理控制台。
+
+电脑 A 的 Claude Code 等主 Agent 可通过原生 **Streamable HTTP MCP** 入口 `/mcp` 调用本机执行端。
+默认只传达任务、沿用远端 Agent 的模型与模式；任务内的子 Agent / 团队要求由执行端自行处理。
+配置与五个工具说明见 [MCP 接入指南](./MCP.md)。
 
 适用场景：在自己管理的机器或服务器上运行编码 Agent，希望多个客户端共享同一套 Agent 配置，
 并且能随时看清任务执行到了哪一步。
@@ -97,6 +101,8 @@ Agent 的编辑页单独设置，默认 60 秒、最大 30 分钟。
 
 ## 接入 Agent
 
+新增 Agent、无人值守策略、模型选择、会话恢复和控制台派发见 [执行与远端控制指南](./RUNTIME.md)。
+
 ### ACP
 
 | Driver | 默认入口 |
@@ -110,6 +116,15 @@ Agent 的编辑页单独设置，默认 60 秒、最大 30 分钟。
 | `hermes` | `hermes acp` |
 | `dsh` | `dsh --profile acp` |
 | `grok` | `grok --no-auto-update agent stdio` |
+| `kimi` | `kimi acp` |
+| `gemini` | `gemini --acp` |
+| `cursor` | `cursor-agent acp` |
+| `devin` | `devin acp` |
+| `zcode` | `zcode-acp-server` |
+| `minimax` | `mcode acp` |
+
+另外提供 `protocol: "cli"` 的 `antigravity` 与 `codex-cli` 驱动，分别使用 `agy` stream-json
+和 `codex exec --json`，需要显式设置 `permissionPolicy: "bypass"`。
 
 `dsh` 与 `grok` 使用各自 CLI 自带的 ACP 入口，不需要 Adapter。
 
@@ -145,10 +160,10 @@ npm install -g \
 命令；期限过短会把正在正常启动的 Agent 报成「不可用 / probe timed out」。启动较慢的 Agent 按实测
 启动时间调高该值即可。
 
-权限策略支持 `ask`（询问）、`allow`（自动允许单次）和 `deny`（拒绝）。`allow` 只选择 Agent 提供的
+权限策略支持 `ask`（远端调用者决策）、`auto`（自动授权）、`bypass`（原生无人值守）、`allow` 和 `deny`。`allow` 只选择 Agent 提供的
 `allow_once`，缺少该选项则取消授权，不回退到永久授权。`ask` 模式下普通 `action: "accept"` 也只选择
 单次授权，永久授权需要客户端明确传入对应 `optionId`。这不限制重复的单次自动授权，但只提供永久选项的
-Agent 需要改用 `ask` 并显式处理。默认仍为 `ask`。
+Agent 可用 `auto` 自动接受其提供的永久选项，或用 `ask` 交给远端主 Agent。默认仍为 `ask`。
 
 ACP 初始化和 `session/new` 共用 30 秒握手期限，超时会失败并回收子进程及会话槽位，该期限独立于任务
 执行超时。
@@ -348,8 +363,8 @@ GET  /v1/runs/:runId/artifacts/:artifactId
 `409`，需要新建会话继续。
 
 API Key 的 Agent scope 在 Agent inventory、Session 创建和后续 Session 操作上都会检查；Session 还绑定
-创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。运行记录接口仅接受管理员
-Cookie，数据面 API Key 无权读取。
+创建它的 Key，其他 Key 即使拥有同一 Agent scope 也不能读取或控制该 Session。运行记录列表仅接受管理员
+Cookie，数据面 API Key 可按已知 Run ID 读取自己的单条记录。
 
 Key 停用、删除、轮换及 scope 缩小时，受影响的现有 SSE 会断开；已经接受的任务继续执行，断开输出不等于
 取消任务。轮换保留 Key ID，新密钥可在原 scope 内继续原 Session；停用后可重新启用恢复访问。删除后不能
@@ -363,7 +378,7 @@ Key 停用、删除、轮换及 scope 缩小时，受影响的现有 SSE 会断�
 
 收到 reset 后，读取同一 Session 的快照、替换当前展示，再使用快照的 `lastEventId` 重连。快照只恢复当前
 状态，不能补回已淘汰的完整事件历史。首次连接没有游标且历史已淘汰时也会 reset；网关重启导致原 Session
-返回 404，需要新建会话。
+返回 404，可新建会话，或使用 `POST /v1/runs/:runId/resume` 显式恢复支持恢复的原生会话。
 
 [`examples/client.mjs`](./examples/client.mjs) 提供带 Bearer 鉴权、去重、指数退避、心跳期限及缺口恢复
 的 Node 20+ 客户端：

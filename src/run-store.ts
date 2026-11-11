@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import type { AgentdEvent, AgentSessionOptions } from './types.js'
 import {
     ArtifactStore,
     artifactStorePathForRunStore,
@@ -44,6 +45,8 @@ interface RunFile {
 }
 
 export interface CreateRunInput {
+    driver?: AgentdRunDetail['driver']
+    options?: AgentSessionOptions
     sessionId: string
     agentId: string
     agentName: string
@@ -255,6 +258,9 @@ export class RunStore {
             taskTruncated: taskTruncated || undefined,
             retryOfRunId: input.retryOfRunId,
             inputAttachmentCount: input.inputAttachmentCount || undefined,
+            options: input.options ? structuredClone(input.options) : undefined,
+            driver: input.driver,
+            events: [],
             state: 'running',
             progress: { phase: '已接收', message: '任务已交给智能体' },
             artifacts: [],
@@ -265,6 +271,15 @@ export class RunStore {
         this.runs.set(run.id, run)
         this.changed()
         return publicDetail(run)
+    }
+
+    appendEvent(id: string, event: AgentdEvent) {
+        const run = this.runs.get(id)
+        if (!run) return
+        const serialized = JSON.stringify(event.data ?? null)
+        const bounded = serialized.length > 8192 ? { truncated: true, preview: serialized.slice(0, 8192) } : event.data
+        run.events = [...(run.events || []).slice(-255), { ...event, data: structuredClone(bounded) }]
+        this.changed()
     }
 
     update(
@@ -634,7 +649,7 @@ function normalizeRun(value: unknown): StoredRun | undefined {
         typeof run.sessionId !== 'string' ||
         typeof run.agentId !== 'string' ||
         typeof run.agentName !== 'string' ||
-        (run.protocol !== 'acp' && run.protocol !== 'a2a') ||
+        !['acp', 'a2a', 'cli'].includes(run.protocol) ||
         typeof run.ownerKeyId !== 'string' ||
         typeof run.task !== 'string' ||
         !STATES.has(run.state) ||
@@ -665,7 +680,7 @@ function nonNegativeNumber(value: number | undefined, fallback: number | undefin
 }
 
 function publicView(run: StoredRun): AgentdRunView {
-    const { ownerKeyId: _ownerKeyId, task, output: _output, artifacts: _artifacts, ...view } = run
+    const { ownerKeyId: _ownerKeyId, task, output: _output, artifacts: _artifacts, events: _events, options: _options, ...view } = run
     return structuredClone({ ...view, taskPreview: task.slice(0, 240),
         // Remote errors/progress can be large too; full values remain in details.
         error: view.error?.slice(0, 600),

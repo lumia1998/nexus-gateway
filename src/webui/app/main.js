@@ -246,7 +246,7 @@ drawerForm.onsubmit = async (event) => {
     try { await submit(drawerForm) } catch (reason) {
       if (version === getDrawerVersion()) {
         error.textContent = reason.message
-        error.scrollIntoView({ block: 'nearest' })
+        drawerForm.scrollTop = drawerForm.scrollHeight
       }
       else toast(reason.message, true)
     }

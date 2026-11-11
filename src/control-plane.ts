@@ -363,7 +363,7 @@ export class AgentdControlPlane {
             if (!workspace) throw new ControlPlaneError(400, 'workspace is required')
             await (await WorkspacePolicy.create(this.config.workspaceRoots)).resolve(workspace)
             next = {
-                protocol: 'acp',
+                protocol: ['antigravity', 'codex-cli'].includes(driver) ? 'cli' : 'acp',
                 driver,
                 enabled: update.enabled ?? previous.enabled !== false,
                 workspace,
@@ -376,6 +376,13 @@ export class AgentdControlPlane {
                     24 * 60 * 60 * 1000
                 ),
                 ...preservedAcpAdvanced(previous)
+            }
+            for (const field of ['model', 'effort', 'mode', 'resumeMethod'] as const) {
+                setOptionalString(next, field, update[field] ?? cleanString(previous[field]))
+            }
+            for (const field of ['startupTimeoutMs', 'taskTimeoutMs', 'stallTimeoutMs', 'idleUnloadMs'] as const) {
+                const value = update[field] === undefined ? previous[field] : update[field]
+                if (value != null) next[field] = clampTimeout(value as number, 600_000, field === 'taskTimeoutMs' ? 10_000 : field === 'startupTimeoutMs' ? 1000 : 0, field === 'startupTimeoutMs' ? 600_000 : 86400_000)
             }
             if (cleanString(update.name) || cleanString(previous.name)) {
                 next.name = cleanString(update.name) || cleanString(previous.name)
@@ -537,7 +544,7 @@ export class AgentdControlPlane {
         }
         return {
             id,
-            protocol: 'acp',
+            protocol: config.protocol || 'acp',
             driver: config.driver,
             name: config.name || id,
             description: config.description,
@@ -545,7 +552,10 @@ export class AgentdControlPlane {
             workspace: config.workspace || this.config.workspaceRoots[0] || '',
             permissionPolicy: config.permissionPolicy || 'ask',
             permissionTimeoutMs: config.permissionTimeoutMs || 15 * 60 * 1000,
-            probeTimeoutMs: config.probeTimeoutMs || 60 * 1000
+            probeTimeoutMs: config.probeTimeoutMs || 60 * 1000,
+            model: config.model, effort: config.effort, mode: config.mode,
+            taskTimeoutMs: config.taskTimeoutMs, startupTimeoutMs: config.startupTimeoutMs,
+            stallTimeoutMs: config.stallTimeoutMs, idleUnloadMs: config.idleUnloadMs, resumeMethod: config.resumeMethod
         }
     }
 

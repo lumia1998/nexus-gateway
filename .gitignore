@@ -13,6 +13,8 @@ nexus-agentd.json
 Thumbs.db
 
 nexus-agentd-runs.json
+*.mcp-dispatch.json
+*.mcp-dispatch.json.*.tmp
 *-runs.json.artifacts/
 *.json.artifacts/
 *.local.json

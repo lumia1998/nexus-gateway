@@ -128,6 +128,22 @@ try {
             headers: { authorization: `Bearer ${keyResult.secret}` }
         })
         if (!meta.ok) throw new Error(`client API smoke failed with HTTP ${meta.status}`)
+        const mcpRequest = async (id, method, params, protocolVersion) => {
+            const result = await fetch(`${origin}/mcp`, {
+                method: 'POST', headers: { authorization: `Bearer ${keyResult.secret}`, 'content-type': 'application/json',
+                    accept: 'application/json, text/event-stream', ...(protocolVersion ? { 'mcp-protocol-version': protocolVersion } : {}) },
+                body: JSON.stringify({ jsonrpc: '2.0', id, method, params })
+            })
+            if (!result.ok) throw new Error(`MCP ${method} smoke failed with HTTP ${result.status}`)
+            const body = await result.json()
+            if (body.error) throw new Error(`MCP ${method} returned a protocol error`)
+            return body.result
+        }
+        const initializedMcp = await mcpRequest(1, 'initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'package-smoke', version: '1.0.0' } })
+        const tools = await mcpRequest(2, 'tools/list', {}, initializedMcp.protocolVersion)
+        if (tools.tools?.length !== 5 || !tools.tools.some(tool => tool.name === 'dispatch_task')) throw new Error('MCP tool catalog smoke failed')
+        const inventory = await mcpRequest(3, 'tools/call', { name: 'list_agents', arguments: {} }, initializedMcp.protocolVersion)
+        if (inventory.isError || !Array.isArray(inventory.structuredContent?.agents)) throw new Error('MCP inventory smoke failed')
         const ui = await fetch(`${origin}/ui/`)
         if (!ui.ok || !(await ui.text()).includes('<!doctype html>')) throw new Error('embedded UI smoke failed')
     } catch (error) {

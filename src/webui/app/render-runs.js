@@ -6,6 +6,7 @@ import { withBusy, toast, runAction } from './toast.js'
 import { openDrawer, getDrawerVersion, openConfirmDrawer, closeDrawer } from './drawer.js'
 import { copySecret } from './render-keys.js'
 import { writeLocationState } from './location-state.js'
+import { selectionFields, policySelect, readSelection, populateOptions } from './runtime-fields.js'
 
 import { refreshRuns } from './data.js'
 import { shortId, formatDate, formatDuration, runStatusLabel } from './format.js'
@@ -57,7 +58,9 @@ export function renderRuns() {
   const active = filtered.filter((run) => activeStates.has(run.state))
   const history = filtered.filter((run) => !activeStates.has(run.state))
   const agentOptions = state.config.agents.map((agent) => '<option value="' + escapeHtml(agent.id) + '"' + selected(state.runAgent, agent.id) + '>' + escapeHtml(agent.name) + '</option>').join('')
-  setActions('<button id="refresh-runs" class="button">' + icons.refresh + '刷新</button>')
+  setActions('<button id="refresh-runs" class="button">' + icons.refresh + '刷新</button><button id="dispatch-task" class="button primary">派发任务</button>')
+  byId('dispatch-task').onclick = () => openTaskDrawer()
+  byId('dispatch-task').disabled = !state.config.agents.some(agent => agent.enabled)
   byId('refresh-runs').onclick = (event) => withBusy(event.currentTarget, () => refreshRuns(true))
 
   if (!state.runs.length && state.resources.runs.status === 'loading') {
@@ -72,7 +75,7 @@ export function renderRuns() {
     pageStats.innerHTML = ''
     setToolbar('')
     setResults('<div class="panel">' +
-      emptyState(icons.activity, '暂无运行记录', '客户端通过网关数据接口发起任务后，进度与结果会出现在这里。') +
+      emptyState(icons.activity, '暂无运行记录', '派发任务后可在此查看进度和结果。') +
       '</div>')
     announce('暂无运行记录')
     return
@@ -99,7 +102,7 @@ export function renderRuns() {
   byId('run-status-filter').value = state.runStatus
   const first = state.runTotal ? state.runOffset + 1 : 0
   const last = Math.min(state.runOffset + pageSize, state.runTotal)
-  setResults((state.runHasNew ? '<p class="panel-note"><button class="button small" id="runs-show-new">有新任务，返回首页查看</button></p>' : '') + '<div class="run-pagination"><span class="muted">在已保留的全部记录中筛选 · 显示 ' + first + '–' + last + '，共 ' + state.runTotal + ' 条 · 第 ' + (Math.floor(state.runOffset / pageSize) + 1) + ' 页</span><div class="row-actions"><button class="button small" id="runs-prev"' + (state.runOffset ? '' : ' disabled') + '>上一页</button><button class="button small" id="runs-next"' + (state.runOffset + pageSize < state.runTotal ? '' : ' disabled') + '>下一页</button></div></div>' +
+  setResults((state.runHasNew ? '<p class="panel-note"><button class="button small" id="runs-show-new">有新任务，返回首页查看</button></p>' : '') + '<div class="run-pagination"><span class="muted">在已保留的全部记录中筛选，显示 ' + first + '–' + last + '，共 ' + state.runTotal + ' 条，第 ' + (Math.floor(state.runOffset / pageSize) + 1) + ' 页</span><div class="row-actions"><button class="button small" id="runs-prev"' + (state.runOffset ? '' : ' disabled') + '>上一页</button><button class="button small" id="runs-next"' + (state.runOffset + pageSize < state.runTotal ? '' : ' disabled') + '>下一页</button></div></div>' +
     '<section class="run-section"><div class="run-section-title"><h2>当前运行</h2><span>' + active.length + ' 项</span></div>' +
       (active.length ? '<div class="run-live-grid">' + active.map(runCard).join('') + '</div>' : '<div class="panel">' + emptyState(icons.activity, '当前没有任务') + '</div>') +
     '</section>' +
@@ -189,7 +192,7 @@ function updateDetailText(element, value) {
 function renderRunDetail(target, run) {
   if (!drawerForm.querySelector('[data-run-detail-body]')) {
     drawerForm.innerHTML = '<div data-run-detail-body>' +
-      '<p class="field-help">管理员可介入任意客户端的任务；操作会记录审计日志。重试使用新会话，旧记录保留。</p>' +
+      '<button type="button" class="button small" data-run-continue>继续会话</button>' +
       '<div class="run-detail-actions"><button type="button" class="button small" data-run-copy="id">复制运行 ID</button><button type="button" class="button small" data-run-copy="output">复制结果</button><button type="button" class="button small" data-run-copy="error">复制错误</button><button type="button" class="button small danger" data-run-cancel>取消任务</button><button type="button" class="button small" data-run-retry>新会话重试</button><button type="button" class="button small danger" data-run-delete>删除记录</button><button type="button" class="button small" data-run-refresh>刷新</button></div>' +
       '<p class="field-help" data-controls-reason></p><p class="form-error" data-detail-error role="status"></p>' +
       '<div class="run-detail-grid">' +
@@ -200,9 +203,10 @@ function renderRunDetail(target, run) {
       '<div class="run-detail-block" data-progress-block><h3>最近进度</h3><pre class="run-detail-code" data-detail-progress></pre></div>' +
       '<div class="run-detail-block" data-output-block><div class="run-output-heading"><h3>智能体结果</h3><label class="checkbox"><input type="checkbox" data-follow-output>跟随最新</label></div><pre class="run-detail-code" data-detail-output></pre></div>' +
       '<div class="run-detail-block" data-error-block><h3>错误</h3><pre class="run-detail-code" data-detail-failure></pre></div>' +
+      '<div class="run-detail-block"><h3>执行日志（最近 256 条）</h3><pre class="run-detail-code" data-detail-log></pre></div>' +
       '<div class="run-detail-block"><h3>产物</h3><div data-detail-artifacts></div></div></div>'
   }
-  byId('drawer-title').textContent = '运行详情 · ' + run.agentName
+  byId('drawer-title').textContent = '运行详情，' + run.agentName
   const fields = { agent: run.agentName, state: runStatusLabel(run.state), startedAt: formatDate(run.startedAt), duration: formatDuration(run), protocol: run.protocol.toUpperCase(), id: run.id, phase: run.progress?.phase || '—', attachments: run.inputAttachmentCount || 0, retry: run.retryOfRunId || '—' }
   for (const [key,value] of Object.entries(fields)) updateDetailText(drawerForm.querySelector('[data-detail-field="' + key + '"]'), value)
   updateDetailText(drawerForm.querySelector('[data-detail-task]'), (run.task || run.taskPreview || '—') + (run.taskTruncated ? '\n\n[记录已截断]' : ''))
@@ -215,12 +219,16 @@ function renderRunDetail(target, run) {
   const artifactLabels = { pending: '保存中', metadata_only: '仅元数据', expired: '已过期', evicted: '已按容量清理', failed: '保存失败' }
   const artifactHtml = run.artifacts?.length ? run.artifacts.map((artifact) =>
     '<div class="list-row"><div class="list-row-main"><strong>' + escapeHtml(artifact.name || artifact.filename || artifact.id || '未命名产物') + '</strong><small>' +
-    escapeHtml([artifact.mediaType, artifact.size === undefined ? '' : artifact.size + ' 字节', artifact.downloadable ? '可下载' : artifactLabels[artifact.storageStatus] || '仅元数据'].filter(Boolean).join(' · ')) +
+    escapeHtml([artifact.mediaType, artifact.size === undefined ? '' : artifact.size + ' 字节', artifact.downloadable ? '可下载' : artifactLabels[artifact.storageStatus] || '仅元数据'].filter(Boolean).join('，')) +
     '</small></div>' + (artifact.downloadable && artifact.id ? '<a class="button small" download href="/v1/admin/runs/' + encodeURIComponent(run.id) + '/artifacts/' + encodeURIComponent(artifact.id) + '">下载</a>' : '') + '</div>'
   ).join('') : '<p class="field-help">暂无产物</p>'
   const artifacts = drawerForm.querySelector('[data-detail-artifacts]')
   if (artifacts.dataset.signature !== artifactHtml) { artifacts.innerHTML = artifactHtml; artifacts.dataset.signature = artifactHtml }
   const controls = run.controls || {}
+  updateDetailText(drawerForm.querySelector('[data-detail-log]'), (run.events || []).map(event => formatDate(event.timestamp) + ' ' + event.type + '\n' + JSON.stringify(event.data, null, 2)).join('\n\n') || '暂无日志')
+  const continueButton = drawerForm.querySelector('[data-run-continue]')
+  continueButton.disabled = !run.protocolSessionId || run.protocol === 'a2a' || ['running', 'input_required', 'permission_required'].includes(run.state)
+  continueButton.onclick = () => openTaskDrawer(run)
   const cancel = drawerForm.querySelector('[data-run-cancel]')
   const retry = drawerForm.querySelector('[data-run-retry]')
   const remove = drawerForm.querySelector('[data-run-delete]')
@@ -238,6 +246,59 @@ function renderRunDetail(target, run) {
     button.onclick = () => runAction(async () => { await copySecret(String(value)); toast('已复制') })
   }
   renderPendingControls(target, controls.pendingRequest)
+}
+
+export function openTaskDrawer(previous) {
+  activeRunDrawer = null
+  const agents = state.config.agents.filter(agent => agent.enabled)
+  const initial = agents.find(agent => agent.id === previous?.agentId) || agents[0]
+  if (!initial) { toast('请先添加智能体', true); return }
+  const body = '<div class="field"><label for="task-agent">智能体</label><select id="task-agent" name="agentId"' + (previous ? ' disabled' : '') + '>' + agents.map(agent => '<option value="' + escapeHtml(agent.id) + '"' + selected(initial.id, agent.id) + '>' + escapeHtml(agent.name) + '</option>').join('') + '</select></div>' +
+    '<div class="field" data-task-workspace><label for="task-workspace">工作区</label><input id="task-workspace" name="workspace" value="' + escapeHtml(previous?.workspace || initial.workspace || '') + '"' + (previous ? ' disabled' : '') + '></div>' +
+    '<div class="field"><label for="task-message">任务</label><textarea id="task-message" name="message" rows="6" required></textarea></div>' +
+    '<div data-task-options>' + policySelect(previous?.options?.permissionPolicy || initial.permissionPolicy || 'ask') +
+    '<details><summary>模型与会话设置</summary><button class="button small" type="button" id="task-discover">读取可用选项</button>' + selectionFields(previous?.options || initial) + '</details></div>'
+  openDrawer(previous ? '继续会话' : '派发任务', body, previous ? '发送' : '派发任务', async (form, isCurrent) => {
+    const data = new FormData(form)
+    const agent = agents.find(item => item.id === byId('task-agent').value) || initial
+    const options = agent.protocol === 'a2a' ? undefined : readSelection(data)
+    const result = await api(previous ? '/v1/admin/runs/' + encodeURIComponent(previous.id) + '/continue' : '/v1/admin/runs', {
+      method: 'POST', body: previous ? { message: String(data.get('message')), options } : {
+        agentId: agent.id, workspace: String(data.get('workspace') || '') || undefined,
+        message: String(data.get('message')), options
+      }
+    })
+    toast('任务已提交')
+    void refreshRuns(true)
+    if (isCurrent() && result.runId) await openRunDrawer(result.runId)
+  })
+  const sync = () => {
+    const agent = agents.find(item => item.id === byId('task-agent').value) || initial
+    const remote = agent.protocol === 'a2a'
+    for (const selector of ['[data-task-workspace]', '[data-task-options]']) {
+      const section = drawerForm.querySelector(selector)
+      section.hidden = remote
+      section.querySelectorAll('input,select,button').forEach(field => { field.disabled = remote || Boolean(previous && field.name === 'workspace') })
+    }
+    if (!previous) {
+      byId('task-workspace').value = agent.workspace || ''
+      byId('task-policy').value = agent.permissionPolicy || 'ask'
+      for (const key of ['model', 'effort', 'mode']) {
+        byId('task-' + key).value = agent[key] || ''
+        byId('task-' + key + '-values').innerHTML = ''
+      }
+    }
+  }
+  byId('task-agent').onchange = sync
+  byId('task-discover').onclick = event => withBusy(event.currentTarget, async () => {
+    const version = getDrawerVersion()
+    const agentId = byId('task-agent').value
+    const runtime = await api('/v1/admin/agents/' + encodeURIComponent(agentId) + '/capabilities', { method: 'POST', body: { workspace: byId('task-workspace').value || undefined } })
+    if (version !== getDrawerVersion() || byId('task-agent').value !== agentId) return
+    populateOptions(runtime)
+    toast('可用选项已更新')
+  })
+  sync()
 }
 
 function confirmRunAction(run, action) {

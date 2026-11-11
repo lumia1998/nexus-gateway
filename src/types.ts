@@ -7,13 +7,33 @@ export type AgentdSessionState =
     | 'failed'
     | 'canceled'
 
-export type AgentdProtocol = 'acp' | 'a2a'
-export type PermissionPolicy = 'ask' | 'allow' | 'deny'
+export type AgentdProtocol = 'acp' | 'a2a' | 'cli'
+export const permissionPolicies = ['ask', 'allow', 'auto', 'bypass', 'deny'] as const
+export type PermissionPolicy = (typeof permissionPolicies)[number]
+
+export interface AgentSessionOptions {
+    model?: string
+    effort?: string
+    mode?: string
+    configOptions?: Record<string, string | boolean>
+    permissionPolicy?: PermissionPolicy
+}
+
+export interface AgentRuntimeView {
+    driver?: AgentdDriverKind
+    status: 'ready' | 'suspended' | 'stopped'
+    resumable: boolean
+    options: AgentSessionOptions
+    configOptions?: unknown[]
+    modes?: { currentModeId: string; availableModes: Array<{ id: string; name: string }> }
+    lastActivityAt?: number
+}
 
 export type AgentdTurnCompletionSource =
     | 'acp_prompt_response'
     | 'a2a_task_status'
     | 'a2a_message_stream'
+    | 'cli_result'
 
 export interface AgentdTurnCompletionProof {
     source: AgentdTurnCompletionSource
@@ -38,13 +58,21 @@ export const agentdDriverKinds = [
     'openclaw',
     'hermes',
     'dsh',
-    'grok'
+    'grok',
+    'kimi',
+    'gemini',
+    'cursor',
+    'devin',
+    'zcode',
+    'minimax',
+    'antigravity',
+    'codex-cli'
 ] as const
 
 export type AgentdDriverKind = (typeof agentdDriverKinds)[number]
 
-export interface AgentdDriverConfig {
-    protocol?: 'acp'
+export interface AgentdDriverConfig extends AgentSessionOptions {
+    protocol?: 'acp' | 'cli'
     driver: AgentdDriverKind
     name?: string
     description?: string
@@ -64,6 +92,11 @@ export interface AgentdDriverConfig {
     env?: Record<string, string>
     permissionPolicy?: PermissionPolicy
     permissionTimeoutMs?: number
+    startupTimeoutMs?: number
+    taskTimeoutMs?: number
+    stallTimeoutMs?: number
+    idleUnloadMs?: number
+    resumeMethod?: 'auto' | 'resume' | 'load' | 'none'
 }
 
 export type A2AAuthType = 'none' | 'bearer' | 'header'
@@ -185,6 +218,13 @@ export interface AgentdAgentConfigView {
     timeoutMs?: number
     taskTimeoutMs?: number
     streamIdleTimeoutMs?: number
+    model?: string
+    effort?: string
+    mode?: string
+    startupTimeoutMs?: number
+    stallTimeoutMs?: number
+    idleUnloadMs?: number
+    resumeMethod?: 'auto' | 'resume' | 'load' | 'none'
 }
 
 export interface AgentdControlPlaneView {
@@ -302,6 +342,7 @@ export interface AgentdSessionView {
     pendingRequest?: AgentdPendingRequest
     /** Structural proof that the current protocol turn reached a valid terminal boundary. */
     completion?: AgentdTurnCompletion
+    runtime?: AgentRuntimeView
     lastEventId?: string
     createdAt: number
     updatedAt: number
@@ -352,10 +393,13 @@ export interface AgentdRunView {
 }
 
 export interface AgentdRunDetail extends AgentdRunView {
+    driver?: AgentdDriverKind
     task: string
     output?: string
     artifacts: AgentdRunArtifactView[]
     controls?: AgentdRunControls
+    options?: AgentSessionOptions
+    events?: AgentdEvent[]
 }
 
 export interface AgentdRunControls {
@@ -381,6 +425,9 @@ export type AgentdEventType =
     | 'completed'
     | 'failed'
     | 'canceled'
+    | 'session_options'
+    | 'runtime_state'
+    | 'permission_decision'
 
 export interface AgentdEvent {
     id: string

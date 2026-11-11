@@ -1,5 +1,6 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { parseSessionOptions } from './runtime-options.js'
 import {
     agentdDriverKinds,
     type A2AAuthType,
@@ -248,7 +249,7 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
     const input = requiredRecord(value, `agents.${id}`)
     const protocol = optionalString(input.protocol, `agents.${id}.protocol`) || 'acp'
     if (protocol === 'a2a') return parseA2AAgent(id, input)
-    if (protocol !== 'acp') throw new Error(`Unsupported protocol for ${id}: ${protocol}`)
+    if (protocol !== 'acp' && protocol !== 'cli') throw new Error(`Unsupported protocol for ${id}: ${protocol}`)
 
     const driver = optionalString(input.driver, `agents.${id}.driver`) || inferDriver(id)
     if (!isAgentdDriverKind(driver)) {
@@ -259,12 +260,14 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
     if (
         permissionPolicy !== 'ask' &&
         permissionPolicy !== 'allow' &&
+        permissionPolicy !== 'auto' &&
+        permissionPolicy !== 'bypass' &&
         permissionPolicy !== 'deny'
     ) {
         throw new Error(`Invalid permissionPolicy for ${id}`)
     }
     const result: AgentdDriverConfig = {
-        protocol: 'acp',
+        protocol: ['antigravity', 'codex-cli'].includes(driver) ? 'cli' : 'acp',
         driver,
         name: optionalString(input.name, `agents.${id}.name`),
         description: optionalString(input.description, `agents.${id}.description`),
@@ -292,6 +295,12 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
                 : stringArray(input.inheritEnv, `agents.${id}.inheritEnv`),
         env: optionalStringRecord(input.env, `agents.${id}.env`),
         permissionPolicy,
+        ...parseSessionOptions(Object.fromEntries(['model', 'effort', 'mode', 'configOptions'].filter(key => input[key] !== undefined).map(key => [key, input[key]]))),
+        startupTimeoutMs: integerValue(input.startupTimeoutMs, `${id}.startupTimeoutMs`, 30_000, 1000, 10 * 60_000),
+        taskTimeoutMs: input.taskTimeoutMs === undefined ? undefined : integerValue(input.taskTimeoutMs, `${id}.taskTimeoutMs`, 1800_000, 10_000, 86400_000),
+        stallTimeoutMs: integerValue(input.stallTimeoutMs, `${id}.stallTimeoutMs`, 10 * 60_000, 0, 86400_000),
+        idleUnloadMs: integerValue(input.idleUnloadMs, `${id}.idleUnloadMs`, 15 * 60_000, 0, 86400_000),
+        resumeMethod: (optionalString(input.resumeMethod, `${id}.resumeMethod`) || 'auto') as AgentdDriverConfig['resumeMethod'],
         permissionTimeoutMs: integerValue(
             input.permissionTimeoutMs,
             `agents.${id}.permissionTimeoutMs`,
@@ -303,6 +312,8 @@ function parseAgent(id: string, value: unknown): AgentdAgentConfig {
     if (driver === 'stdio' && !result.command) {
         throw new Error(`nexus-agentd agents.${id}.command is required for the stdio driver`)
     }
+    if (!['auto', 'resume', 'load', 'none'].includes(result.resumeMethod!)) throw new Error(`Invalid resumeMethod for ${id}`)
+    if (protocol === 'cli' && result.protocol !== 'cli') throw new Error('cli protocol requires antigravity or codex-cli driver')
     return result
 }
 

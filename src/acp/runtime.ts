@@ -15,7 +15,11 @@ import type {
     AgentdPendingResponse
 } from '../types.js'
 import { TURN_COMPLETION_CONTRACT } from '../completion-contract.js'
-import { readContainedFile, statContainedFile } from '../workspace.js'
+import { readContainedFile, statContainedFile, WorkspacePolicy } from '../workspace.js'
+import type { AgentRuntimeView, AgentSessionOptions } from '../types.js'
+import { parseSessionOptions } from '../runtime-options.js'
+import { findOption, selectionValue, unattendedMode } from './selection.js'
+import { readAcpText, writeAcpText } from './filesystem.js'
 
 interface PendingPermission {
     request: AgentdPendingRequest
@@ -58,6 +62,14 @@ export class AcpProcessRuntime {
     private inputDirectory?: string
     private workspace?: string
     private promptOutput = ''
+    private options: AgentSessionOptions
+    private configOptions: acp.SessionConfigOption[] = []
+    private modes?: acp.SessionModeState
+    private resumeMethod?: 'resume' | 'load'
+    private suspended = false
+    private lastActivityAt = Date.now()
+    private restoring = false
+    private disposal?: Promise<void>
 
     constructor(
         private readonly driver: AgentDriver,
@@ -65,13 +77,17 @@ export class AcpProcessRuntime {
         maxStderrChunkChars = 16 * 1024,
         promptTimeoutMs = 30 * 60 * 1000,
         private readonly allowedRoots: readonly string[] = [],
-        private readonly startupTimeoutMs = 30_000
+        private readonly startupTimeoutMs = 30_000,
+        options: AgentSessionOptions = {}
     ) {
         const limit = Number.isFinite(maxStderrChunkChars)
             ? Math.floor(maxStderrChunkChars)
             : 16 * 1024
         this.maxStderrChunkChars = Math.max(1, Math.min(16 * 1024, limit))
         this.promptTimeoutMs = Math.max(10_000, Math.trunc(promptTimeoutMs))
+        const defaults: AgentSessionOptions = driver.config || {}
+        this.options = { model: defaults.model, effort: defaults.effort, mode: defaults.mode, configOptions: defaults.configOptions,
+            permissionPolicy: driver.permissionPolicy, ...options }
     }
 
     async start(workspace: string) {
@@ -90,12 +106,26 @@ export class AcpProcessRuntime {
         if (this.process) throw new Error('ACP runtime is already started')
         this.workspace = workspace
         this.inputDirectory = path.join(workspace, '.nexus-inputs', this.sink.id)
-        const child = this.driver.spawn(workspace)
+        let args = [...this.driver.args]
+        if (this.driver.kind === 'cursor' && this.options.model) {
+            const index = args.indexOf('acp')
+            if (index < 0) throw new Error('Cursor model selection requires an acp subcommand')
+            args.splice(index, 0, '--model', this.options.model)
+        }
+        if (this.driver.kind === 'grok' && this.options.effort) {
+            const index = args.indexOf('stdio')
+            args.splice(index < 0 ? args.length : index, 0, '--effort', this.grokEffort(this.options.effort))
+        }
+        if (this.driver.kind === 'grok' && this.options.permissionPolicy === 'bypass') {
+            const index = args.indexOf('stdio')
+            args.splice(index < 0 ? args.length : index, 0, '--always-approve')
+        }
+        const child = this.driver.spawn(workspace, this.options, args)
         this.process = child
         this.captureStderr(child)
         child.once('error', (error) => this.onProcessFailure(error))
         child.once('exit', (code, signal) => {
-            if (this.disposed) return
+            if (this.disposed || this.process !== child) return
             if (this.sink.state === 'canceled' || this.sink.state === 'completed') return
             this.onProcessFailure(
                 new Error(
@@ -115,6 +145,19 @@ export class AcpProcessRuntime {
             .onNotification(acp.methods.client.session.update, ({ params }) => {
                 this.sessionUpdate(params)
             })
+        if (this.driver.kind === 'gemini') {
+            app.onRequest(acp.methods.client.fs.readTextFile, ({ params }) => {
+                if (this.disposed || params.sessionId !== this.sink.acpSessionId) throw new Error('Unknown ACP session')
+                return readAcpText(workspace, params.path, params.line, params.limit)
+            })
+            app.onRequest(acp.methods.client.fs.writeTextFile, async ({ params }) => {
+                if (this.disposed || params.sessionId !== this.sink.acpSessionId) throw new Error('Unknown ACP session')
+                if (this.options.permissionPolicy === 'deny') throw new Error('File write denied by session policy')
+                const result = await writeAcpText(workspace, params.path, params.content)
+                this.sink.emit('file_activity', { locations: [{ path: params.path }], operation: 'write' })
+                return result
+            })
+        }
         const stream = acp.ndJsonStream(
             Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
             Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
@@ -125,6 +168,7 @@ export class AcpProcessRuntime {
             {
                 protocolVersion: acp.PROTOCOL_VERSION,
                 clientCapabilities: {
+                    ...(this.driver.kind === 'gemini' ? { fs: { readTextFile: true, writeTextFile: true } } : {}),
                     elicitation: {
                         form: {},
                         url: {}
@@ -132,7 +176,7 @@ export class AcpProcessRuntime {
                 },
                 clientInfo: {
                     name: 'nexus-agentd',
-                    version: '0.2.2'
+                    version: '0.7.0'
                 }
             }
         )
@@ -144,19 +188,142 @@ export class AcpProcessRuntime {
             })
         }
         this.promptCapabilities = initialize.agentCapabilities?.promptCapabilities || {}
-        const session = await this.connection.agent.request(
-            acp.methods.agent.session.new,
-            {
-                cwd: workspace,
-                mcpServers: []
-            }
-        )
+        const configuredResume = this.driver.config?.resumeMethod || 'auto'
+        this.resumeMethod = configuredResume === 'none' ? undefined : configuredResume === 'resume' || configuredResume === 'load'
+            ? configuredResume : initialize.agentCapabilities?.sessionCapabilities?.resume ? 'resume'
+            : initialize.agentCapabilities?.loadSession ? 'load' : undefined
+        const nativeId = this.sink.acpSessionId
+        if (nativeId && !this.resumeMethod) throw new Error('Agent does not support restoring its native session')
+        this.restoring = Boolean(nativeId)
+        const session = nativeId
+            ? await this.connection.agent.request(this.resumeMethod === 'resume' ? acp.methods.agent.session.resume : acp.methods.agent.session.load,
+                { cwd: workspace, sessionId: nativeId, mcpServers: [] })
+            : await this.connection.agent.request(acp.methods.agent.session.new, { cwd: workspace, mcpServers: [],
+                ...(this.driver.kind === 'grok' ? { _meta: { yoloMode: this.options.permissionPolicy === 'bypass',
+                    ...(this.options.model ? { modelId: this.options.model } : {}),
+                    ...(this.options.effort ? { reasoningEffort: this.grokEffort(this.options.effort) } : {}) } } : {}) })
+        this.restoring = false
         if (this.disposed) throw new Error('ACP runtime is disposed')
-        this.sink.setAcpSessionId(String(session.sessionId))
+        this.sink.setAcpSessionId(nativeId || String((session as acp.NewSessionResponse).sessionId))
+        this.remember(session)
+        await this.applySelection(this.options)
+        this.lastActivityAt = Date.now()
         this.sink.setState('created')
     }
 
+    view(): AgentRuntimeView {
+        return { driver: this.driver.kind, status: this.suspended ? 'suspended' : this.isAvailable() ? 'ready' : 'stopped', resumable: Boolean(this.resumeMethod),
+            options: structuredClone(this.options), configOptions: structuredClone(this.configOptions), modes: this.modes ? structuredClone(this.modes) : undefined,
+            lastActivityAt: this.lastActivityAt }
+    }
+
+    private remember(value: { configOptions?: acp.SessionConfigOption[] | null; modes?: acp.SessionModeState | null }) {
+        if (value.configOptions) this.configOptions = value.configOptions
+        if (value.modes) this.modes = value.modes
+    }
+
+    async configure(options: AgentSessionOptions) {
+        if (this.prompting || this.pending || this.pendingInput) throw new Error('Cannot configure an active turn')
+        const update = parseSessionOptions(options)
+        if (this.suspended) await this.wake()
+        if (!this.isAvailable()) throw new Error('Agent runtime is unavailable')
+        if (this.driver.kind === 'cursor' && update.model && update.model !== this.options.model) throw new Error('Cursor model selection requires a new session')
+        if (this.driver.kind === 'grok' && update.effort && update.effort !== this.options.effort) throw new Error('Grok effort selection requires a new session')
+        try { await this.applySelection(update) } catch (error) {
+            for (const category of ['model', 'effort', 'mode'] as const) {
+                const current = findOption(this.configOptions, category)?.currentValue
+                if (typeof current === 'string') this.options[category] = current
+            }
+            this.sink.emit('session_options', this.view())
+            if (error instanceof PromptTimeoutError) {
+                this.sink.setState('failed', error.message)
+                await this.dispose()
+            }
+            throw error
+        }
+        this.options = { ...this.options, ...update, configOptions: { ...this.options.configOptions, ...update.configOptions } }
+        this.sink.emit('session_options', this.view())
+    }
+
+    private async setOption(option: acp.SessionConfigOption, requested: string | boolean) {
+        const value = selectionValue(this.driver.kind || '', option, requested)
+        if (option.currentValue === value) return
+        const response = await withTimeout(this.connection!.agent.request(acp.methods.agent.session.setConfigOption,
+            { sessionId: this.requireSessionId(), configId: option.id, value } as acp.SetSessionConfigOptionRequest), this.startupTimeoutMs, 'ACP configuration timed out')
+        this.remember(response)
+    }
+
+    private async applySelection(options: AgentSessionOptions) {
+        for (const category of ['model', 'effort', 'mode'] as const) {
+            const requested = options[category]
+            if (!requested) continue
+            if (this.driver.kind === 'cursor' && category === 'model' || this.driver.kind === 'grok' && category === 'effort') continue
+            const option = findOption(this.configOptions, category)
+            if (option) await this.setOption(option, requested)
+            else if (category === 'model' && this.driver.kind === 'grok') {
+                const params = { sessionId: this.requireSessionId(), modelId: requested,
+                    ...((options.effort || this.options.effort) ? { _meta: { reasoningEffort: this.grokEffort(options.effort || this.options.effort!) } } : {}) }
+                try { await withTimeout(this.connection!.agent.request('session/setModel', params), this.startupTimeoutMs, 'Grok model selection timed out') }
+                catch (error) {
+                    if ((error as { code?: number }).code !== -32601) throw error
+                    await withTimeout(this.connection!.agent.request('session/set_model', params), this.startupTimeoutMs, 'Grok model selection timed out')
+                }
+            }
+            else if (category === 'model' && this.driver.kind === 'gemini') {
+                await withTimeout(this.connection!.agent.request('session/set_model', { sessionId: this.requireSessionId(), modelId: requested }), this.startupTimeoutMs, 'Gemini model selection timed out')
+            }
+            else if (category === 'mode') await this.setMode(requested)
+            else throw new Error(`Agent does not advertise ${category} selection`)
+            this.options[category] = requested
+        }
+        for (const [id, value] of Object.entries(options.configOptions || {})) {
+            const option = this.configOptions.find(item => item.id === id)
+            if (!option) throw new Error(`Agent does not advertise config option: ${id}`)
+            await this.setOption(option, value)
+            this.options.configOptions = { ...this.options.configOptions, [id]: value }
+        }
+        if (options.permissionPolicy === 'bypass') {
+            const permissionOption = this.configOptions.find(item => item.id === 'permissionMode')
+            const mode = unattendedMode(this.driver.kind || '')
+            if (permissionOption) await this.setOption(permissionOption, 'bypassPermissions')
+            else if (mode && (findOption(this.configOptions, 'mode') || this.modes?.availableModes.some(item => item.id === mode))) {
+                const option = findOption(this.configOptions, 'mode')
+                if (option) await this.setOption(option, mode)
+                else await this.setMode(mode)
+            }
+        } else if (options.permissionPolicy && this.options.permissionPolicy === 'bypass') {
+            throw new Error('Leaving native bypass mode requires a new session')
+        }
+    }
+
+    private grokEffort(effort: string) { return effort === 'max' ? 'xhigh' : effort === 'off' ? 'none' : effort }
+
+    private async setMode(mode: string) {
+        if (!this.modes?.availableModes.some(item => item.id === mode)) throw new Error(`Unsupported session mode: ${mode}`)
+        await withTimeout(this.connection!.agent.request(acp.methods.agent.session.setMode, { sessionId: this.requireSessionId(), modeId: mode }), this.startupTimeoutMs, 'ACP mode selection timed out')
+        this.modes.currentModeId = mode
+    }
+
+    async suspend() {
+        if (this.prompting || this.pending || this.pendingInput || !this.resumeMethod || !this.isAvailable() || this.suspended) return false
+        await this.dispose()
+        this.suspended = true
+        this.sink.emit('runtime_state', this.view())
+        return true
+    }
+
+    private async wake() {
+        if (!this.suspended) return
+        if (this.allowedRoots.length) await (await WorkspacePolicy.create([...this.allowedRoots])).resolve(this.workspace!)
+        this.suspended = false
+        this.disposed = false
+        this.disposal = undefined
+        await this.start(this.workspace!)
+        this.sink.emit('runtime_state', this.view())
+    }
+
     async prompt(message: string, attachments: AgentdInputAttachment[] = []) {
+        if (this.suspended) await this.wake()
         if (this.disposed) throw new Error('ACP runtime is disposed')
         if (!this.connection) throw new Error('ACP runtime is not connected')
         if (this.prompting) throw new Error('ACP session is already processing a prompt')
@@ -166,13 +333,12 @@ export class AcpProcessRuntime {
         this.sink.clearPending()
         this.sink.setState('running')
         try {
-            const response = await withTimeout(
+            this.lastActivityAt = Date.now()
+            const response = await this.watchTurn(
                 this.connection.agent.request(acp.methods.agent.session.prompt, {
                     sessionId,
                     prompt: await this.promptBlocks(message, attachments)
                 }),
-                this.promptTimeoutMs,
-                'ACP prompt timed out'
             )
             if (this.sink.state === 'canceled' || this.sink.state === 'failed') {
                 return
@@ -208,6 +374,26 @@ export class AcpProcessRuntime {
         } finally {
             this.prompting = false
         }
+    }
+
+    private watchTurn<T>(promise: Promise<T>): Promise<T> {
+        let elapsed = 0
+        let previous = Date.now()
+        const stall = this.driver.config?.stallTimeoutMs ?? 10 * 60_000
+        let timer: NodeJS.Timeout
+        const deadline = new Promise<never>((_, reject) => {
+            timer = setInterval(() => {
+                const now = Date.now()
+                if (!this.pending && !this.pendingInput) {
+                    elapsed += now - previous
+                    if (elapsed >= this.promptTimeoutMs) reject(new PromptTimeoutError('ACP task deadline exceeded'))
+                    else if (stall > 0 && now - this.lastActivityAt >= stall) reject(new PromptTimeoutError('ACP stalled: no protocol progress'))
+                } else this.lastActivityAt = now
+                previous = now
+            }, 250)
+            timer.unref?.()
+        })
+        return Promise.race([promise, deadline]).finally(() => clearInterval(timer))
     }
 
     async respondPending(
@@ -320,8 +506,14 @@ export class AcpProcessRuntime {
     }
 
     async dispose() {
-        if (this.disposed) return
+        this.suspended = false
+        if (this.disposed) return this.disposal
         this.disposed = true
+        this.disposal = this.closeResources()
+        return this.disposal
+    }
+
+    private async closeResources() {
         if (this.pending) {
             clearTimeout(this.pending.timer)
             this.pending.reject(new Error('ACP runtime disposed'))
@@ -353,14 +545,16 @@ export class AcpProcessRuntime {
     }
 
     isAvailable() {
-        return !this.disposed && Boolean(this.connection) &&
+        return this.suspended || !this.disposed && Boolean(this.connection) &&
             (!this.process || (this.process.exitCode === null && this.process.signalCode === null))
     }
 
     private requestPermission(
         params: acp.RequestPermissionRequest
     ): Promise<acp.RequestPermissionResponse> | acp.RequestPermissionResponse {
-        if (this.driver.permissionPolicy === 'deny') {
+        this.lastActivityAt = Date.now()
+        const policy = this.options.permissionPolicy || this.driver.permissionPolicy
+        if (policy === 'deny') {
             const reject = params.options.find((option) =>
                 option.kind.startsWith('reject')
             )
@@ -373,11 +567,12 @@ export class AcpProcessRuntime {
                   }
                 : { outcome: { outcome: 'cancelled' } }
         }
-        if (this.driver.permissionPolicy === 'allow') {
+        if (policy === 'allow' || policy === 'auto' || policy === 'bypass') {
             const allow =
                 params.options.find(
                     (option) => option.kind.toLowerCase() === 'allow_once'
-                )
+                ) || (policy !== 'allow' ? params.options.find(option => option.kind === 'allow_always') : undefined)
+            this.sink.emit('permission_decision', { policy, toolCallId: params.toolCall.toolCallId, optionId: allow?.optionId, outcome: allow ? 'allowed' : 'canceled' })
             return allow
                 ? {
                       outcome: {
@@ -415,6 +610,7 @@ export class AcpProcessRuntime {
                 this.sink.clearPending()
                 this.sink.setState('failed', 'ACP permission request timed out')
                 resolve({ outcome: { outcome: 'cancelled' } })
+                void this.dispose().catch(error => this.sink.emit('terminal_output', { stream: 'system', text: `Cleanup failed: ${String(error)}` }))
             }, this.driver.permissionTimeoutMs)
             this.pending = { request, resolve, reject, timer }
         })
@@ -454,6 +650,7 @@ export class AcpProcessRuntime {
                 this.sink.clearPending()
                 this.sink.setState('failed', 'ACP input request timed out')
                 resolve({ action: 'cancel' })
+                void this.dispose().catch(error => this.sink.emit('terminal_output', { stream: 'system', text: `Cleanup failed: ${String(error)}` }))
             }, this.driver.permissionTimeoutMs)
             this.pendingInput = { request, params, resolve, timer }
         })
@@ -490,7 +687,18 @@ export class AcpProcessRuntime {
     }
 
     private sessionUpdate(params: acp.SessionNotification) {
+        this.lastActivityAt = Date.now()
         const update = params.update
+        if (update.sessionUpdate === 'config_option_update') {
+            this.configOptions = update.configOptions
+            this.sink.emit('session_options', this.view())
+            return
+        }
+        if (update.sessionUpdate === 'current_mode_update') {
+            if (this.modes) this.modes.currentModeId = update.currentModeId
+            return
+        }
+        if (this.restoring) return
         switch (update.sessionUpdate) {
             case 'agent_message_chunk':
                 if (update.content.type === 'text') {

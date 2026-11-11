@@ -3,6 +3,9 @@ import { stat } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { AcpProcessRuntime } from './acp/runtime.js'
 import { A2AClientRuntime } from './a2a/runtime.js'
+import { CliProcessRuntime } from './cli-runtime.js'
+import { parseSessionOptions } from './runtime-options.js'
+import type { AgentSessionOptions } from './types.js'
 import type { AgentDriver } from './drivers/index.js'
 import { SessionEventLog } from './events.js'
 import { RunStore, type RunListQuery, type RunArtifactQuery } from './run-store.js'
@@ -97,6 +100,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
     output = ''
     error?: string
     pendingRequest?: AgentdPendingRequest
+    idleUnloadMs = 0
     private completion?: AgentdTurnCompletion
     private artifacts: AgentdArtifact[] = []
     private inputAttachments = new Map<string, AgentdInputAttachment>()
@@ -137,6 +141,17 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
 
     runtimeAvailable() {
         return Boolean(this.runtime && this.runtime.isAvailable?.() !== false)
+    }
+
+    async configure(options: AgentSessionOptions) {
+        if (isActive(this.state) || this.pendingRequest) throw new SessionRequestError(409, 'Cannot configure an active turn')
+        if (!this.runtime?.configure) throw new SessionRequestError(400, 'Runtime does not support session options')
+        await this.runtime.configure(options)
+    }
+
+    async unloadIdle(cutoff: number) {
+        if (this.updatedAt > cutoff || isActive(this.state) || this.pendingRequest) return
+        await this.runtime?.suspend?.()
     }
 
     setProtocolSessionId(id: string) {
@@ -385,6 +400,10 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             request.kind === 'permission' ? 'permission_required' : 'input_required',
             request
         )
+        if (this.currentRunId) this.runStore?.appendEvent(this.currentRunId, {
+            id: this.events.lastId!, sessionId: this.id, type: request.kind === 'permission' ? 'permission_required' : 'input_required', timestamp: this.updatedAt,
+            data: request
+        })
         this.syncRun({
             state: this.state,
             progress: {
@@ -406,6 +425,10 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             type === 'artifact' && data ? runArtifact(data as AgentdArtifact) : data
         )
         const progress = progressForEvent(type, data)
+        if (this.currentRunId) this.runStore?.appendEvent(this.currentRunId, {
+            id: this.events.lastId!, sessionId: this.id, type, timestamp: this.updatedAt,
+            data: type === 'artifact' && data ? runArtifact(data as AgentdArtifact) : data
+        })
         if (progress) this.syncRun({ progress })
     }
 
@@ -474,6 +497,8 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             ownerKeyId: this.ownerKeyId,
             task: message,
             inputAttachmentCount: attachments.length,
+            options: this.runtime.view?.().options,
+            driver: this.runtime.view?.().driver,
             ...(retryOfRunId ? { retryOfRunId } : {})
         }).id
         this.setState('running')
@@ -533,6 +558,7 @@ export class ManagedSession implements AgentSessionSink, AcpSessionSink {
             agentId: this.agentId,
             workspace: this.workspace,
             state: this.state,
+            runtime: this.runtime?.view?.(),
             output: this.output || undefined,
             error: this.error,
             // Public view only: `sourcePath` is a host path and must never be
@@ -731,7 +757,39 @@ export class SessionManager {
         return this.readiness.listAgents(agentIds, force)
     }
 
-    async create(agentId: string, workspaceInput: string | undefined, ownerKeyId: string) {
+    getRunStorePath() { return this.runStore?.filePath }
+    async flushRuns() { await this.runStore?.flush() }
+
+    agentDefaults(id: string) {
+        if (!Object.hasOwn(this.config.agents, id)) throw new SessionRequestError(404, 'Agent not found')
+        const config = this.config.agents[id]
+        const local = config.protocol !== 'a2a'
+        return {
+            options: local ? { model: config.model, effort: config.effort, mode: config.mode, permissionPolicy: config.permissionPolicy || 'ask' } : undefined,
+            workspace: local ? this.defaultWorkspace(id) : undefined,
+            activeTasks: [...this.sessions.values()].filter(session => session.agentId === id && isActive(session.state)).length,
+            configured: local ? {
+                startupTimeoutMs: config.startupTimeoutMs ?? 30_000, taskTimeoutMs: config.taskTimeoutMs ?? this.config.promptTimeoutMs ?? 1800_000,
+                stallTimeoutMs: config.stallTimeoutMs ?? 600_000, idleUnloadMs: config.idleUnloadMs ?? 900_000
+            } : undefined
+        }
+    }
+
+    async dispatchMessage(id: string, message: string, options: AgentSessionOptions = {}, reserve?: () => void) {
+        if (!message.trim()) throw new SessionRequestError(400, 'message is required')
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            if (isActive(session.state) || session.pendingRequest) throw new SessionRequestError(409, 'Session is busy; respond to its pending request or wait')
+            if (Object.keys(options).length) await session.configure(options)
+            reserve?.()
+            await session.message(message)
+            return session.snapshot()
+        })
+    }
+
+    async create(agentId: string, workspaceInput: string | undefined, ownerKeyId: string, options: AgentSessionOptions = {}, nativeSessionId?: string) {
+        options = parseSessionOptions(options)
+        if (this.config.agents[agentId]?.protocol === 'a2a' && Object.keys(options).length) throw new SessionRequestError(400, 'A2A session options are managed by the remote agent')
         if (!Object.hasOwn(this.config.agents, agentId) || this.config.agents[agentId].enabled === false) {
             throw new SessionRequestError(404, `Configured agent not found: ${agentId}`)
         }
@@ -739,11 +797,11 @@ export class SessionManager {
         await this.withSessionLock('admission', async () => {
             release = await this.admission.reserve()
         })
-        try { return await this.createReserved(agentId, workspaceInput, ownerKeyId, release) }
+        try { return await this.createReserved(agentId, workspaceInput, ownerKeyId, release, options, nativeSessionId) }
         finally { release() }
     }
 
-    private async createReserved(agentId: string, workspaceInput: string | undefined, ownerKeyId: string, release: () => void) {
+    private async createReserved(agentId: string, workspaceInput: string | undefined, ownerKeyId: string, release: () => void, options: AgentSessionOptions, nativeSessionId?: string) {
         const config = Object.hasOwn(this.config.agents, agentId) ? this.config.agents[agentId] : undefined
         if (!config || config.enabled === false) {
             throw new SessionRequestError(404, `Configured agent not found: ${agentId}`)
@@ -768,7 +826,7 @@ export class SessionManager {
         }
         const session = new ManagedSession(
             agentId,
-            config.protocol === 'a2a' ? 'a2a' : 'acp',
+            config.protocol || 'acp',
             workspace,
             ownerKeyId,
             this.config.maxEventsPerSession,
@@ -786,6 +844,10 @@ export class SessionManager {
                     state
                 })
         )
+        if (nativeSessionId) {
+            if (config.protocol === 'cli') session.setProtocolSessionId(nativeSessionId)
+            else session.setAcpSessionId(nativeSessionId)
+        }
         const runtime: AgentSessionRuntime =
             config.protocol === 'a2a'
                 ? new A2AClientRuntime(
@@ -793,13 +855,18 @@ export class SessionManager {
                 session,
                 this.config.promptTimeoutMs || 30 * 60_000
             )
+                : config.protocol === 'cli'
+                ? new CliProcessRuntime(driver!, session, config.taskTimeoutMs ?? this.config.promptTimeoutMs ?? 1800_000, options)
                 : new AcpProcessRuntime(
                       driver!,
                       session,
                       this.config.maxOutputChars,
-                      this.config.promptTimeoutMs || 30 * 60_000,
-                      this.workspacePolicy.listRoots()
+                      config.taskTimeoutMs ?? this.config.promptTimeoutMs ?? 30 * 60_000,
+                      this.workspacePolicy.listRoots(),
+                      config.startupTimeoutMs ?? 30_000,
+                      options
                   )
+        session.idleUnloadMs = config.protocol !== 'a2a' ? config.idleUnloadMs ?? 900_000 : 0
         this.sessions.set(session.id, session)
         this.notifyLifecycle({
             type: 'session_created',
@@ -855,6 +922,37 @@ export class SessionManager {
         const run = this.runStore?.get(id)
         if (!run) throw new RunNotFoundError(id)
         return run
+    }
+
+    async resumeRun(id: string, ownerKeyId?: string, reserve?: () => () => void) {
+        const target = this.getRun(id)
+        return this.withSessionLock(`resume:${JSON.stringify([target.agentId, target.protocolSessionId])}`, async () => {
+            const run = this.getRun(id)
+            const owner = this.getRunOwnerKeyId(id)
+            if (!owner || ownerKeyId && owner !== ownerKeyId) throw new SessionRequestError(404, 'Run not found')
+            if (isActive(run.state)) throw new SessionRequestError(409, 'Cannot restore an active run')
+            if (run.protocol === 'a2a' || !run.protocolSessionId) throw new SessionRequestError(409, 'Run has no restorable local session')
+            const existing = Array.from(this.sessions.values()).find(session => session.agentId === run.agentId && session.protocolSessionId === run.protocolSessionId && session.ownerKeyId === owner && session.runtimeAvailable())
+            if (existing) {
+                if (isActive(existing.state)) throw new SessionRequestError(409, 'Native session is already processing a task')
+                return existing.snapshot()
+            }
+            const config = this.config.agents[run.agentId]
+            if (!config || (config.protocol || 'acp') !== run.protocol) throw new SessionRequestError(409, 'Agent protocol changed since this run')
+            if (config.protocol !== 'a2a' && run.driver && config.driver !== run.driver) throw new SessionRequestError(409, 'Agent driver changed since this run')
+            // Restore context only. Never replay the historical task automatically.
+            const release = reserve?.()
+            try { return await this.create(run.agentId, run.workspace, owner, run.options || {}, run.protocolSessionId) }
+            catch (error) { release?.(); throw error }
+        })
+    }
+
+    async configure(id: string, options: AgentSessionOptions) {
+        return this.withSessionLock(id, async () => {
+            const session = this.require(id)
+            await session.configure(parseSessionOptions(options))
+            return session.snapshot()
+        })
     }
 
     getRunOwnerKeyId(id: string) {
@@ -1096,7 +1194,13 @@ export class SessionManager {
     private async cleanup() {
         const cutoff = Date.now() - this.config.sessionTtlMs
         for (const [id, session] of this.sessions) {
-            if (session.updatedAt > cutoff) continue
+            if (session.updatedAt > cutoff) {
+                const idle = session.idleUnloadMs
+                if (idle > 0) await this.withSessionLock(id, async () => {
+                    if (this.sessions.get(id) === session) await session.unloadIdle(Date.now() - idle)
+                })
+                continue
+            }
             await this.withSessionLock(id, async () => {
                 if (this.sessions.get(id) !== session || session.updatedAt > cutoff) return
                 if (!isTerminal(session.state)) session.setState('failed', 'Session expired after exceeding its lifetime')

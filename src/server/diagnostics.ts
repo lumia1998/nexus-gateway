@@ -92,6 +92,7 @@ export class DiagnosticRunner {
                     durationMs: elapsed(startupStartedAt),
                     message: agentConfig.protocol === 'a2a'
                         ? 'A2A transport and session creation completed'
+                        : agentConfig.protocol === 'cli' ? 'Native CLI configuration accepted; the process starts when a task is submitted'
                         : 'Process startup, ACP initialize and session/new completed'
                 })
             } catch (error) {

@@ -680,7 +680,7 @@ test('history keeps table semantics; slow detail requests cannot reopen a closed
     finish()
     await expect(page.locator('#drawer')).toBeHidden()
     await button.click()
-    await expect(page.locator('#drawer-title')).toHaveText('运行详情 · 研究助手')
+    await expect(page.locator('#drawer-title')).toHaveText('运行详情，研究助手')
     await page.keyboard.press('Escape')
 })
 

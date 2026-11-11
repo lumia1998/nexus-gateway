@@ -12,8 +12,8 @@ import { readinessRows, statusMarkup } from './render-agents.js'
 
 export function overviewAgent(agent) {
   return '<div class="list-row"><div class="list-row-main"><strong>' + escapeHtml(agent.name) + '</strong><small>' +
-    escapeHtml(agent.protocol.toUpperCase() + (agent.driver ? ' · ' + agent.driver : '')) +
-    (agent.error ? ' · ' + escapeHtml(localizeError(agent.error)) : '') + '</small></div><div class="row-actions">' +
+    escapeHtml(agent.protocol.toUpperCase() + (agent.driver ? '，' + agent.driver : '')) +
+    (agent.error ? '，' + escapeHtml(localizeError(agent.error)) : '') + '</small></div><div class="row-actions">' +
     '<button class="button small" data-agent-edit="' + escapeHtml(agent.id) + '">编辑</button><button class="button small" data-agent-diagnostics="' + escapeHtml(agent.id) + '">连接诊断</button>' + statusMarkup(agent) + '</div></div>'
 }
 
@@ -31,7 +31,7 @@ function attentionRow(run) {
     '<button class="button small" data-run-detail="' + escapeHtml(run.id) + '">查看详情</button>' +
     '<button class="button small danger" data-run-quick-delete="' + escapeHtml(run.id) + '">删除记录</button>'
   return '<div class="list-row"><div class="list-row-main"><strong>' + escapeHtml(run.agentName) + '</strong><small>' +
-    escapeHtml(runStatusLabel(run.state) + ' · ' + (run.taskPreview || '')) + '</small></div><div class="row-actions">' + actions + '</div></div>'
+    escapeHtml(runStatusLabel(run.state) + '，' + (run.taskPreview || '')) + '</small></div><div class="row-actions">' + actions + '</div></div>'
 }
 
 export function renderOverview() {

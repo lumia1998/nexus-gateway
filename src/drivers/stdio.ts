@@ -70,6 +70,9 @@ export function createStdioAcpDriver(
         command,
         args,
         env,
+        kind: config.driver,
+        protocol: config.protocol === 'cli' ? 'cli' : 'acp',
+        config,
         permissionPolicy: config.permissionPolicy || 'ask',
         permissionTimeoutMs: config.permissionTimeoutMs || 15 * 60 * 1000,
         ownsProcessGroup: process.platform !== 'win32',
@@ -89,7 +92,7 @@ export function createStdioAcpDriver(
                     id,
                     name,
                     description,
-                    protocol: 'acp',
+                    protocol: config.protocol === 'cli' ? 'cli' : 'acp',
                     ready: true,
                     version
                 }
@@ -98,16 +101,17 @@ export function createStdioAcpDriver(
                     id,
                     name,
                     description,
-                    protocol: 'acp',
+                    protocol: config.protocol === 'cli' ? 'cli' : 'acp',
                     ready: false,
                     error: error instanceof Error ? error.message : String(error)
                 }
             }
         },
-        spawn(workspace) {
-            return spawnCommand(command, args, {
+        spawn(workspace, _options, overrideArgs) {
+            return spawnCommand(command, overrideArgs || args, {
                 cwd: workspace,
                 env,
+                windowsHide: true,
                 detached: process.platform !== 'win32',
                 stdio: ['pipe', 'pipe', 'pipe']
             })

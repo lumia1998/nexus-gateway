@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { validateAdminPassword } from './auth.js'
 import type { AgentdProtocol,AgentdDriverKind,PermissionPolicy,A2ATransportPreference,A2AAuthType,AgentdApiKeyScope } from './types.js'
+import { permissionPolicies } from './types.js'
 
 export interface AgentdAgentUpdate {
     protocol?: AgentdProtocol
@@ -20,6 +21,13 @@ export interface AgentdAgentUpdate {
     timeoutMs?: number
     taskTimeoutMs?: number | null
     streamIdleTimeoutMs?: number | null
+    model?: string
+    effort?: string
+    mode?: string
+    startupTimeoutMs?: number
+    stallTimeoutMs?: number
+    idleUnloadMs?: number
+    resumeMethod?: 'auto' | 'resume' | 'load' | 'none'
 }
 
 export interface AgentdApiKeyUpdate {
@@ -56,16 +64,14 @@ export function validateIntegerRange(value: number, min: number, max: number, na
 }
 
 export function validateUpdate(update: AgentdAgentUpdate) {
-    if (update.protocol !== undefined && update.protocol !== 'acp' && update.protocol !== 'a2a') {
-        throw new ControlPlaneError(400, 'protocol must be acp or a2a')
+    if (update.protocol !== undefined && !['acp', 'a2a', 'cli'].includes(update.protocol)) {
+        throw new ControlPlaneError(400, 'protocol must be acp, cli or a2a')
     }
     if (
         update.permissionPolicy !== undefined &&
-        update.permissionPolicy !== 'ask' &&
-        update.permissionPolicy !== 'allow' &&
-        update.permissionPolicy !== 'deny'
+        !permissionPolicies.includes(update.permissionPolicy)
     ) {
-        throw new ControlPlaneError(400, 'permissionPolicy must be ask, allow, or deny')
+        throw new ControlPlaneError(400, 'Invalid permissionPolicy')
     }
     if (
         update.preferredTransport !== undefined &&
@@ -170,7 +176,7 @@ export function clampTimeout(value: number | undefined, fallback: number, min: n
 
 export function preservedAcpAdvanced(previous: Record<string, unknown>) {
     const result: Record<string, unknown> = {}
-    for (const key of ['command', 'args', 'probeArgs', 'probeTimeoutMs', 'inheritEnv', 'env']) {
+    for (const key of ['command', 'args', 'probeArgs', 'probeTimeoutMs', 'inheritEnv', 'env', 'configOptions']) {
         if (previous[key] !== undefined) result[key] = structuredClone(previous[key])
     }
     return result

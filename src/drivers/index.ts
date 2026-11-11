@@ -9,6 +9,7 @@ import { createOpenClawDriver } from './openclaw.js'
 import { createPiDriver } from './pi.js'
 import { createStdioAcpDriver } from './stdio.js'
 import type { AgentDriver } from './types.js'
+import { createCatalogDriver } from './catalog.js'
 
 export function createDriverRegistry(config: AgentdConfig) {
     const drivers = new Map<string, AgentDriver>()
@@ -49,6 +50,16 @@ export function createDriverRegistry(config: AgentdConfig) {
                 break
             case 'grok':
                 drivers.set(id, createGrokDriver(id, driver))
+                break
+            case 'kimi':
+            case 'gemini':
+            case 'cursor':
+            case 'devin':
+            case 'zcode':
+            case 'minimax':
+            case 'antigravity':
+            case 'codex-cli':
+                drivers.set(id, createCatalogDriver(id, driver))
                 break
         }
     }

@@ -7,6 +7,7 @@ import type {
     AgentdSessionState,
     AgentdTurnCompletionProof
 } from './types.js'
+import type { AgentRuntimeView, AgentSessionOptions } from './types.js'
 
 export interface AgentSessionSink {
     readonly id: string
@@ -29,6 +30,9 @@ export interface AcpSessionSink extends AgentSessionSink {
 }
 
 export interface AgentSessionRuntime {
+    view?(): AgentRuntimeView
+    configure?(options: AgentSessionOptions): Promise<void>
+    suspend?(): Promise<boolean>
     isAvailable?(): boolean
     start(workspace?: string): Promise<void>
     prompt(message: string, attachments?: AgentdInputAttachment[]): Promise<void>

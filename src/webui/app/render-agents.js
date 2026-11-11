@@ -8,6 +8,7 @@ import { copySecret } from './render-keys.js'
 
 import { loadAll, refreshReadiness } from './data.js'
 import { permissionLabel } from './format.js'
+import { selectionFields, lifecycleFields } from './runtime-fields.js'
 
 import { render } from './render.js'
 import { setResults, setActions, setToolbar, announce, emptyState, bindSearch, preciseUnitValue } from './render-shared.js'
@@ -15,7 +16,7 @@ import { setResults, setActions, setToolbar, announce, emptyState, bindSearch, p
 export function statusMarkup(agent) {
   if (!agent.enabled) return '<span class="status">已禁用</span>'
   if (agent.checking) return '<span class="status checking">检查中</span>'
-  return agent.ready ? '<span class="status ready" title="' + (agent.protocol === 'acp' ? '命令探测通过；创建会话时才进行 ACP 握手' : 'Agent Card 探测通过；实际任务可能仍失败') + '">' + (agent.protocol === 'acp' ? '命令可用' : 'Card 可用') + '</span>' : '<span class="status failed">不可用</span>'
+  return agent.ready ? '<span class="status ready" title="' + (agent.protocol !== 'a2a' ? '命令探测通过；创建会话时才进行 ACP 握手' : 'Agent Card 探测通过；实际任务可能仍失败') + '">' + (agent.protocol !== 'a2a' ? '命令可用' : 'Card 可用') + '</span>' : '<span class="status failed">不可用</span>'
 }
 
 export function readinessById() {
@@ -82,7 +83,7 @@ export function renderAgents() {
   })
   setToolbar('agents',
     '<div class="toolbar"><div class="search-box">' + icons.search + '<input id="agent-search" type="search" aria-label="搜索智能体" placeholder="搜索智能体" value="' + escapeHtml(state.search) + '"></div>' +
-    '<select id="protocol-filter" aria-label="按协议筛选"><option value="all">全部协议</option><option value="acp"' + selected(state.protocol, 'acp') + '>ACP</option><option value="a2a"' + selected(state.protocol, 'a2a') + '>A2A</option></select>' +
+    '<select id="protocol-filter" aria-label="按协议筛选"><option value="all">全部协议</option><option value="acp"' + selected(state.protocol, 'acp') + '>ACP</option><option value="cli"' + selected(state.protocol, 'cli') + '>原生 CLI</option><option value="a2a"' + selected(state.protocol, 'a2a') + '>A2A</option></select>' +
     '<select id="status-filter" aria-label="按就绪状态筛选"><option value="all">全部状态</option><option value="ready"' + selected(state.status, 'ready') + '>就绪</option><option value="failed"' + selected(state.status, 'failed') + '>不可用</option><option value="disabled"' + selected(state.status, 'disabled') + '>已禁用</option></select></div>')
   setResults('<div class="table-wrap"><table class="agent-table"><thead><tr><th>智能体</th><th>协议</th><th>驱动</th><th>状态</th><th>工作区</th><th>权限策略</th><th>操作</th></tr></thead><tbody>' +
     (rows.length ? rows.map((agent) => agentRow(agent, lookup.get(agent.id))).join('') : '<tr><td colspan="7" class="empty">没有符合条件的智能体。</td></tr>') +
@@ -113,10 +114,11 @@ export function openAgentDrawer(agent) {
   const stdioNotice = '<div data-driver-section="stdio" class="field' + (configuredDriver === 'stdio' ? '' : ' hidden') + '"><small class="field-help">stdio 的 command、参数与环境变量由本地配置提供；控制台仅支持编辑已有项的通用设置。</small></div>'
   const body =
     '<div class="field"><label for="f-id">智能体 ID</label><input id="f-id" name="id" value="' + escapeHtml(current.id || '') + '" pattern="[a-z0-9][a-z0-9._\\-]{0,63}" required' + (editing ? ' disabled' : '') + '></div>' +
-    '<div class="field-row"><div class="field"><label for="f-protocol">协议</label><select id="f-protocol" name="protocol"><option value="acp"' + selected(current.protocol, 'acp') + '>ACP</option><option value="a2a"' + selected(current.protocol, 'a2a') + '>A2A</option></select></div><div class="field"><span class="field-spacer" aria-hidden="true">&nbsp;</span><label class="checkbox"><input name="enabled" type="checkbox"' + checked(current.enabled) + '>启用</label></div></div>' +
+    '<div class="field-row"><div class="field"><label for="f-protocol">协议</label><select id="f-protocol" name="protocol"><option value="acp"' + selected(current.protocol, 'acp') + '>ACP</option><option value="cli"' + selected(current.protocol, 'cli') + '>原生 CLI</option><option value="a2a"' + selected(current.protocol, 'a2a') + '>A2A</option></select></div><div class="field"><span class="field-spacer" aria-hidden="true">&nbsp;</span><label class="checkbox"><input name="enabled" type="checkbox"' + checked(current.enabled) + '>启用</label></div></div>' +
     '<div class="field"><label for="f-name">名称</label><input id="f-name" name="name" value="' + escapeHtml(current.name || '') + '" required></div>' +
     '<div class="field"><label for="f-description">描述</label><textarea id="f-description" name="description">' + escapeHtml(current.description || '') + '</textarea></div>' +
-    '<div data-protocol-section="acp"><div class="field"><label for="f-driver">驱动</label><select id="f-driver" name="driver">' + (drivers || '<option value="" disabled selected>请先配置可用驱动</option>') + '</select></div>' + stdioNotice + '<div class="field"><label for="f-workspace">工作区</label><input id="f-workspace" name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></div><div class="field-row"><div class="field"><label for="f-permissionPolicy">权限策略</label><select id="f-permissionPolicy" name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>询问</option><option value="allow"' + selected(current.permissionPolicy, 'allow') + '>自动允许单次</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></div><div class="field"><label for="f-permissionTimeoutMs">权限确认超时（秒）</label><input id="f-permissionTimeoutMs" name="permissionTimeoutMs" type="number" min="1" max="86400" step="0.001" value="' + escapeHtml(permissionTimeoutSeconds) + '"><small class="field-help">默认 900 秒，最长 24 小时。自动策略只选 allow_once；只有永久选项时拒绝，请改为询问并显式授权。</small></div></div></div>' +
+    '<div data-protocol-section="acp"><details><summary>模型与会话设置</summary>' + selectionFields(current, 'f') + '</details>' + lifecycleFields(current) + '</div>' +
+    '<div data-protocol-section="acp"><div class="field"><label for="f-driver">驱动</label><select id="f-driver" name="driver">' + (drivers || '<option value="" disabled selected>请先配置可用驱动</option>') + '</select></div>' + stdioNotice + '<div class="field"><label for="f-workspace">工作区</label><input id="f-workspace" name="workspace" list="workspace-roots" value="' + escapeHtml(current.workspace || state.config.workspaceRoots[0] || '') + '" required><datalist id="workspace-roots">' + roots + '</datalist></div><div class="field-row"><div class="field"><label for="f-permissionPolicy">权限策略</label><select id="f-permissionPolicy" name="permissionPolicy"><option value="ask"' + selected(current.permissionPolicy, 'ask') + '>由调用者决定</option><option value="auto"' + selected(current.permissionPolicy, 'auto') + '>自动授权</option><option value="bypass"' + selected(current.permissionPolicy, 'bypass') + '>原生无人值守</option><option value="allow"' + selected(current.permissionPolicy, 'allow') + '>仅自动允许单次</option><option value="deny"' + selected(current.permissionPolicy, 'deny') + '>拒绝</option></select></div><div class="field"><label for="f-permissionTimeoutMs">权限确认超时（秒）</label><input id="f-permissionTimeoutMs" name="permissionTimeoutMs" type="number" min="1" max="86400" step="0.001" value="' + escapeHtml(permissionTimeoutSeconds) + '"><small class="field-help">由调用者决定时，申请会发送给远端客户端。自动授权可接受单次或永久选项；原生无人值守还会应用智能体支持的免审批模式。</small></div></div></div>' +
     '<div data-protocol-section="a2a"><div class="field"><label for="f-agentCardUrl">Agent Card URL</label><input id="f-agentCardUrl" name="agentCardUrl" type="url" value="' + escapeHtml(current.agentCardUrl || '') + '" placeholder="http://agent.local:8080/.well-known/agent-card.json" required><small class="field-help">调用地址与能力从 Card 自动发现。</small></div><div class="field-row"><div class="field"><label for="f-preferredTransport">首选传输</label><select id="f-preferredTransport" name="preferredTransport"><option value="auto"' + selected(current.preferredTransport || 'auto', 'auto') + '>自动（按 Card）</option><option value="jsonrpc"' + selected(current.preferredTransport, 'jsonrpc') + '>JSON-RPC</option><option value="http-json"' + selected(current.preferredTransport, 'http-json') + '>HTTP+JSON</option></select></div><div class="field"><label for="f-authType">认证方式</label><select id="f-authType" name="authType"><option value="none"' + selected(current.auth && current.auth.type || 'none', 'none') + '>无认证</option><option value="bearer"' + selected(current.auth && current.auth.type, 'bearer') + '>Bearer Token</option><option value="header"' + selected(current.auth && current.auth.type, 'header') + '>自定义请求头</option></select></div></div><div class="field" data-auth-header><label for="f-authHeaderName">请求头名称</label><input id="f-authHeaderName" name="authHeaderName" value="' + escapeHtml(current.auth && current.auth.headerName || '') + '" placeholder="X-API-Key"></div><div class="field" data-auth-value><label data-auth-value-label for="f-authValue">认证凭据</label><input id="f-authValue" name="authValue" type="password" autocomplete="off" placeholder="' + (editing && current.auth && current.auth.configured ? '留空以保留当前凭据' : '') + '"></div><div class="field"><label for="f-timeoutMs">普通请求/建连超时（秒）</label><input id="f-timeoutMs" name="timeoutMs" type="number" min="1" max="1800" step="any" value="' + escapeHtml(requestTimeoutSeconds) + '"><small class="field-help">只限制单次请求和建连，不限制整轮任务。</small></div><div class="field"><label for="f-taskTimeoutMs">单轮任务期限（秒）</label><input id="f-taskTimeoutMs" name="taskTimeoutMs" type="number" min="10" max="86400" step="any" value="' + escapeHtml(taskTimeoutSeconds) + '" placeholder="继承全局 ACP 任务超时（' + escapeHtml(preciseUnitValue(inheritedTaskTimeoutMs, 1000, 1800)) + ' 秒）" data-inherited="' + (taskTimeoutInherited ? 'true' : 'false') + '"><small class="field-help">留空表示继承全局 ACP 任务超时（当前 ' + escapeHtml(preciseUnitValue(inheritedTaskTimeoutMs, 1000, 1800)) + ' 秒）。</small></div><div class="field"><label for="f-streamIdleTimeoutMs">流无进度超时（秒）</label><input id="f-streamIdleTimeoutMs" name="streamIdleTimeoutMs" type="number" min="1" max="1800" step="any" value="' + escapeHtml(streamIdleTimeoutSeconds) + '" placeholder="继承普通请求/建连超时（' + escapeHtml(preciseUnitValue(inheritedIdleTimeoutMs, 1000, 60)) + ' 秒）" data-inherited="' + (streamIdleTimeoutInherited ? 'true' : 'false') + '"><small class="field-help">留空表示继承普通请求/建连超时，收到进度会重新计时。</small></div></div>'
   openDrawer(editing ? '编辑智能体' : '添加智能体', body, editing ? '保存修改' : '添加智能体', async (form, isCurrent) => {
     const data = new FormData(form)
@@ -128,11 +130,21 @@ export function openAgentDrawer(agent) {
       description: String(data.get('description') || '').trim(),
       enabled: data.get('enabled') === 'on'
     }
-    if (protocol === 'acp') {
+    if (protocol !== 'a2a') {
       payload.driver = data.get('driver')
       payload.workspace = String(data.get('workspace') || '').trim()
       payload.permissionPolicy = data.get('permissionPolicy')
       payload.permissionTimeoutMs = Math.round(Number(data.get('permissionTimeoutMs')) * 1000)
+      for (const key of ['model', 'effort', 'mode']) {
+        const value = String(data.get(key) || '').trim()
+        if (value !== (current[key] || '')) payload[key] = value
+      }
+      for (const [key, fallback] of [['startupTimeoutMs', 30000], ['stallTimeoutMs', 600000], ['idleUnloadMs', 900000]]) {
+        const value = Math.round(Number(data.get(key)) * 1000)
+        if (value !== (current[key] ?? fallback)) payload[key] = value
+      }
+      const taskTimeoutMs = Math.round(Number(data.get('localTaskTimeoutMs')) * 1000)
+      if (taskTimeoutMs !== (current.taskTimeoutMs ?? 1800000)) payload.taskTimeoutMs = taskTimeoutMs
     } else {
       payload.agentCardUrl = String(data.get('agentCardUrl') || '').trim()
       payload.preferredTransport = data.get('preferredTransport')
@@ -160,12 +172,12 @@ export function openAgentDrawer(agent) {
   const authSelect = drawerFormElements().authType
   const sync = () => {
     document.querySelectorAll('#drawer-form [data-protocol-section]').forEach((section) => {
-      section.classList.toggle('hidden', section.dataset.protocolSection !== protocolSelect.value)
+      section.classList.toggle('hidden', section.dataset.protocolSection === 'a2a' ? protocolSelect.value !== 'a2a' : protocolSelect.value === 'a2a')
       section.querySelectorAll('input,select,textarea').forEach((field) => { field.disabled = section.classList.contains('hidden') })
     })
     const driver = drawerFormElements().driver?.value
     document.querySelectorAll('#drawer-form [data-driver-section]').forEach((section) => {
-      const hidden = protocolSelect.value !== 'acp' || section.dataset.driverSection !== driver
+      const hidden = protocolSelect.value === 'a2a' || section.dataset.driverSection !== driver
       section.classList.toggle('hidden', hidden)
       section.querySelectorAll('input,textarea').forEach((field) => { field.disabled = hidden })
     })
@@ -178,7 +190,10 @@ export function openAgentDrawer(agent) {
   }
   protocolSelect.onchange = sync
   authSelect.onchange = sync
-  byId('f-driver').onchange = sync
+  byId('f-driver').onchange = () => {
+    protocolSelect.value = ['antigravity', 'codex-cli'].includes(byId('f-driver').value) ? 'cli' : 'acp'
+    sync()
+  }
   byId('f-taskTimeoutMs').oninput = (event) => { event.currentTarget.dataset.inherited = 'false' }
   byId('f-streamIdleTimeoutMs').oninput = (event) => { event.currentTarget.dataset.inherited = 'false' }
   sync()
